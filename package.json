@@ -1,0 +1,15 @@
+{
+  "name": "tra-cuu-phat-nguoi",
+  "version": "1.0.0",
+  "description": "Tra cứu phạt nguội phương tiện tại Việt Nam (VNeTraffic)",
+  "type": "module",
+  "bin": {
+    "check-vnetraffic": "./scripts/check_vnetraffic.mjs"
+  },
+  "scripts": {
+    "check-vnetraffic": "node ./scripts/check_vnetraffic.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
