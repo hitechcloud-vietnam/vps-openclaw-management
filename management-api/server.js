@@ -2079,6 +2079,60 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
+  // POST /api/send — Upstream outbound send
+  // =========================================================================
+  if (route(req, 'POST', '/api/send')) {
+    try {
+      const body = await parseBody(req);
+      const params = {
+        ...body,
+        idempotencyKey: body.idempotencyKey || crypto.randomUUID()
+      };
+      const result = gatewayMethod('send', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
+      return json(res, 200, {
+        ok: true,
+        method: 'send',
+        idempotencyKey: params.idempotencyKey,
+        result
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/agents/identity/resolve — Upstream agent identity resolve
+  // =========================================================================
+  if (route(req, 'POST', '/api/agents/identity/resolve')) {
+    try {
+      const body = await parseBody(req);
+      const result = gatewayMethod('agent.identity.get', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'agent.identity.get', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/agent-runs/:runId/wait — Upstream agent run wait
+  // =========================================================================
+  if ((m = route(req, 'POST', '/api/agent-runs/:runId/wait'))) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const params = { ...body, runId: m.params.runId };
+      const result = gatewayMethod('agent.wait', params, { timeoutMs: Number(body.timeoutMs || 35000) || 35000 });
+      return json(res, 200, { ok: true, method: 'agent.wait', runId: m.params.runId, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/system/events — Upstream system event ingest
+  // =========================================================================
+  if (route(req, 'POST', '/api/system/events')) {
+    try {
+      const body = await parseBody(req);
+      const result = gatewayMethod('system-event', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'system-event', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
   // GET /api/providers — List tat ca providers (built-in + custom)
   // =========================================================================
   if (route(req, 'GET', '/api/providers')) {

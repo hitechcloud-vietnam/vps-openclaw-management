@@ -2537,6 +2537,103 @@
       ]
     },
     {
+      "name": "Messaging & Agent Runtime",
+      "item": [
+        {
+          "name": "Send Outbound Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"channel:C1\",\n  \"message\": \"OpenClaw outbound message test\",\n  \"channel\": \"slack\",\n  \"threadId\": \"thread-123\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/send",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "send"]
+            },
+            "description": "Send an outbound message via upstream `send`. The API auto-generates `idempotencyKey` when omitted."
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve Agent Identity",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"agentId\": \"main\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/identity/resolve",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "identity", "resolve"]
+            },
+            "description": "Resolve display identity metadata for an agent or a session via upstream `agent.identity.get`."
+          },
+          "response": []
+        },
+        {
+          "name": "Wait Agent Run",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"timeoutMs\": 15000\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agent-runs/run-123/wait",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agent-runs", "run-123", "wait"]
+            },
+            "description": "Long-poll an agent run via upstream `agent.wait`. A timeout still returns HTTP 200 with status `timeout`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create System Event",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Node: gateway-1\",\n  \"host\": \"gateway-1\",\n  \"ip\": \"10.0.0.5\",\n  \"version\": \"2026.3.23\",\n  \"mode\": \"active\",\n  \"reason\": \"startup\",\n  \"roles\": [\"gateway\"],\n  \"tags\": [\"prod\"]\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/system/events",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "system", "events"]
+            },
+            "description": "Submit an upstream `system-event` to update presence and emit system activity."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Devices",
       "item": [
         {
