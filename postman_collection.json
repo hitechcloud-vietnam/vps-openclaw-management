@@ -808,6 +808,16 @@
               }
             ],
             "body": {
+              "mode": "raw",
+              "raw": "{\n  \"account\": \"default\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/telegram/logout",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "telegram", "logout"]
+            },
+            "description": "Convenience logout route that injects the channel name from the URL path."
+          },
           "response": []
         },
         {
@@ -968,16 +978,6 @@
               ]
             },
             "description": "Return a consolidated Zalo snapshot with local config state, filtered channel probe output, pairing summary, and operational guidance for Marketplace-bot deployments."
-          },
-          "response": []
-              "raw": "{\n  \"account\": \"default\"\n}"
-            },
-            "url": {
-              "raw": "{{BASE_URL}}/api/channels/telegram/logout",
-              "host": ["{{BASE_URL}}"],
-              "path": ["api", "channels", "telegram", "logout"]
-            },
-            "description": "Convenience logout route that injects the channel name from the URL path."
           },
           "response": []
         }
@@ -2513,6 +2513,16 @@
             ],
             "body": {
               "mode": "raw",
+              "raw": "{\n  \"baseHash\": \"replace-with-node-hash\",\n  \"file\": {\n    \"version\": 1,\n    \"defaultMode\": \"prompt\",\n    \"allow\": [],\n    \"deny\": []\n  }\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/nodes/node-123/exec-approvals",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "nodes", "node-123", "exec-approvals"]
+            },
+            "description": "Update a node execution approvals file through `exec.approvals.node.set`."
+          },
+          "response": []
         },
         {
           "name": "Create Exec Approval Request",
@@ -2529,9 +2539,9 @@
               "raw": "{\n  \"command\": \"npm run build\",\n  \"commandArgv\": [\"npm\", \"run\", \"build\"],\n  \"cwd\": \"/workspace\",\n  \"ask\": \"Allow build command?\",\n  \"host\": \"local\",\n  \"timeoutMs\": 120000,\n  \"twoPhase\": true\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/exec-approvals/requests",
+              "raw": "{{BASE_URL}}/api/exec-approvals/requests",
               "host": [
-                "{{baseUrl}}"
+                "{{BASE_URL}}"
               ],
               "path": [
                 "api",
@@ -2540,7 +2550,8 @@
               ]
             }
           },
-          "description": "Create a live execution approval request via upstream `exec.approval.request`. The wrapper defaults `twoPhase` to `true` when omitted."
+          "description": "Create a live execution approval request via upstream `exec.approval.request`. The wrapper defaults `twoPhase` to `true` when omitted.",
+          "response": []
         },
         {
           "name": "Wait Exec Approval Decision",
@@ -2548,9 +2559,9 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/exec-approvals/requests/{{approvalId}}?timeoutMs=35000",
+              "raw": "{{BASE_URL}}/api/exec-approvals/requests/{{approvalId}}?timeoutMs=35000",
               "host": [
-                "{{baseUrl}}"
+                "{{BASE_URL}}"
               ],
               "path": [
                 "api",
@@ -2566,7 +2577,8 @@
               ]
             }
           },
-          "description": "Wait for or poll the final decision of an execution approval request via `exec.approval.waitDecision`. Approval state is held in gateway memory."
+          "description": "Wait for or poll the final decision of an execution approval request via `exec.approval.waitDecision`. Approval state is held in gateway memory.",
+          "response": []
         },
         {
           "name": "Resolve Exec Approval",
@@ -2583,9 +2595,9 @@
               "raw": "{\n  \"decision\": \"allow-once\"\n}"
             },
             "url": {
-              "raw": "{{baseUrl}}/api/exec-approvals/requests/{{approvalId}}/decision",
+              "raw": "{{BASE_URL}}/api/exec-approvals/requests/{{approvalId}}/decision",
               "host": [
-                "{{baseUrl}}"
+                "{{BASE_URL}}"
               ],
               "path": [
                 "api",
@@ -2596,16 +2608,7 @@
               ]
             }
           },
-          "description": "Resolve a pending execution approval via `exec.approval.resolve`. Supported decisions are `allow-once`, `allow-always`, and `deny`."
-              "raw": "{\n  \"baseHash\": \"replace-with-node-hash\",\n  \"file\": {\n    \"version\": 1,\n    \"defaultMode\": \"prompt\",\n    \"allow\": [],\n    \"deny\": []\n  }\n}"
-            },
-            "url": {
-              "raw": "{{BASE_URL}}/api/nodes/node-123/exec-approvals",
-              "host": ["{{BASE_URL}}"],
-              "path": ["api", "nodes", "node-123", "exec-approvals"]
-            },
-            "description": "Update a node execution approvals file through `exec.approvals.node.set`."
-          },
+          "description": "Resolve a pending execution approval via `exec.approval.resolve`. Supported decisions are `allow-once`, `allow-always`, and `deny`.",
           "response": []
         }
       ]
@@ -3150,6 +3153,159 @@
               "body": "{\n  \"ok\": true,\n  \"agentId\": \"main\",\n  \"provider\": \"anthropic\",\n  \"embedding\": {\n    \"ok\": true,\n    \"error\": null\n  },\n  \"note\": \"This endpoint provides a management-layer readiness check based on current config and credentials.\"\n}"
             }
           ]
+        }
+      ]
+    },
+    {
+      "name": "Agents",
+      "item": [
+        {
+          "name": "List Agents",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents"]
+            },
+            "description": "List configured agents, default status, model assignments, and auth-profile counts."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Agent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"ops\",\n  \"name\": \"Operations Agent\",\n  \"model\": \"anthropic/claude-sonnet-4-20250514\",\n  \"default\": false\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents"]
+            },
+            "description": "Create a new managed agent with workspace and agent directories initialized automatically."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Agent",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/main",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "main"]
+            },
+            "description": "Get one agent with effective default status, masked API keys, and auth-profile presence."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Agent",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Main Operations Agent\",\n  \"workspace\": \"~/.openclaw/workspace-main\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/main",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "main"]
+            },
+            "description": "Update editable agent metadata such as `name`, `model`, `workspace`, or `agentDir`."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Agent",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deleteData\": false\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/ops",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "ops"]
+            },
+            "description": "Delete a non-default agent. Set `deleteData=true` to remove its persisted config directory too."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Default Agent",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/main/default",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "main", "default"]
+            },
+            "description": "Mark an agent as the default agent used by the management layer."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Agent API Keys",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/main/api-key",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "main", "api-key"]
+            },
+            "description": "Read masked provider API keys stored for one agent via auth profiles."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Agent API Key",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"anthropic\",\n  \"apiKey\": \"sk-ant-example\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/agents/main/api-key",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "agents", "main", "api-key"]
+            },
+            "description": "Store or replace one provider API key for a specific agent and restart OpenClaw."
+          },
+          "response": []
         }
       ]
     },
