@@ -1,10 +1,117 @@
-# Traffic Fine Lookup VN - OpenClaw Skill
-
-This skill allows users to check traffic (fine) violations for Vietnamese vehicles (cars, motorbikes) by license plate using vnetraffic.org as an intermediary, with guidance to cross-verify on official portals.
-
+---
+name: traffic-fine-lookup-vn
+description: "Look up traffic fines for vehicles in Vietnam by license plate, summarize the result, and remind the user to cross-check official portals."
+metadata: {"openclaw":{"emoji":"🚦","homepage":"https://www.csgt.vn","skillKey":"traffic-fine-lookup-vn","requires":{"config":["gateway.controlUi.enabled"]},"primaryEnv":"TRAFFIC_LOOKUP_REGION"}}
 ---
 
-## Script
+# Traffic Fine Lookup VN
+
+Use this skill when the user asks to check traffic violations or unpaid traffic fines for a vehicle in Vietnam by license plate.
+
+This skill uses `vnetraffic.org` as an intermediate lookup source and must always guide the user to verify important findings with official portals such as `https://www.csgt.vn`.
+
+## Purpose
+
+- Normalize Vietnamese license plates into the expected API input format.
+- Query the VNeTraffic-style endpoint through the provided script.
+- Summarize the result in a clear and non-alarmist way.
+- Explain what the result means and what the user should verify next.
+
+## When to Use
+
+- The user asks to check traffic fines for a car, motorbike, or electric motorbike in Vietnam.
+- The user provides a Vietnamese license plate and wants to know whether there are unresolved violations.
+- The user needs help interpreting lookup results from an unofficial or intermediary source.
+
+## When Not to Use
+
+- The user wants a legally binding conclusion without checking official sources.
+- The user asks for a violation lookup outside Vietnam.
+- The user does not provide enough information to identify the vehicle type.
+
+## Required Inputs
+
+- `plate`: Vietnamese license plate.
+- `type`: one of `oto`, `xemay`, or `xemaydien`.
+- `phone` (optional): contact phone number required by the upstream endpoint. If not supplied, the script uses a placeholder.
+
+## License Plate Rules
+
+- Convert to uppercase.
+- Remove spaces, hyphens, and dots before lookup.
+- Example: `51K-123.45` becomes `51K12345`.
+
+## Vehicle Type Mapping
+
+- `oto` → `1`
+- `xemay` → `2`
+- `xemaydien` → `3`
+
+## Script to Use
+
+```bash
+node scripts/check_vnetraffic.mjs --plate <LICENSE_PLATE> --type <oto|xemay|xemaydien> [--phone <PHONE_NUMBER>]
+```
+
+Example:
+
+```bash
+node scripts/check_vnetraffic.mjs --plate 51K12345 --type oto
+```
+
+## Expected Workflow
+
+1. Confirm the plate and vehicle type.
+2. Normalize the plate before lookup.
+3. Run `scripts/check_vnetraffic.mjs` with the normalized values.
+4. Read the returned JSON carefully.
+5. Summarize:
+   - total violations
+   - unresolved count
+   - resolved count
+   - important violation details such as time, place, authority, and payment location
+6. Clearly label the source as an intermediate source.
+7. Recommend official verification if the result shows a violation or if the user needs formal confirmation.
+
+## Output Format Guidance
+
+When there are violations:
+
+- State that the lookup found records.
+- Summarize counts first.
+- Present each violation in a compact list:
+  - time
+  - location
+  - status
+  - authority
+  - payment or handling location
+
+When there are no violations or no data:
+
+- State that no data was found from the intermediate source.
+- Avoid claiming that the vehicle is fully clear in a legal sense.
+- Recommend checking the official portals if the user needs certainty.
+
+## Reliability and Safety Notes
+
+- `vnetraffic.org` is not an official government system.
+- Treat the result as an operational hint, not a final legal conclusion.
+- Always recommend cross-checking with:
+  - `https://www.csgt.vn`
+  - relevant Vietnam Registry channels when applicable
+- Do not invent missing fields.
+- Do not speculate about fines, penalties, or legal outcomes beyond the returned data.
+
+## Fallback Handling
+
+If the endpoint fails, times out, or returns incomplete data:
+
+1. Tell the user the automated lookup could not be completed.
+2. Ask the user for the search result screenshot if they already checked manually.
+3. Help interpret the returned fields.
+4. Suggest official verification steps.
+
+## Script Reference
 
 ```javascript
 #!/usr/bin/env node
@@ -89,75 +196,12 @@ main().catch((err) => {
 });
 ```
 
----
-
-## Description
-
-This is an OpenClaw skill to look up traffic violations (fines) for vehicles in Vietnam.
-
-### Installation & Usage
-
-See the `SKILL.md` file for more details on running and interpreting lookup results.
-
-### Publishing Info
-
-To publish this skill to ClawHub:
+## Publishing Example
 
 ```bash
 clawhub publish . \
   --slug traffic-fine-lookup-vn \
   --name "Traffic Fine Lookup VN" \
   --version 1.0.0 \
-  --changelog "Privacy remove"
+  --changelog "Initial published skill"
 ```
-
----
-name: traffic-fine-lookup-vn
-description: Lookup traffic fines for vehicles in Vietnam. Use when the user asks to check traffic fines in VN by license plate (car/motorbike), especially via VNeTraffic-style lookup and CSGT cross-verification guidance.
----
-
-# Lookup Vietnam Traffic Fines
-
-Quick check using the VNeTraffic endpoint, then guide users to cross-confirm via official portals (CSGT/Registry) for formal verification.
-
-## Quick lookup
-
-Use the script:
-
-```bash
-node scripts/check_vnetraffic.mjs --plate <LICENSE_PLATE> --type <oto|xemay|xemaydien> [--phone <PHONE_NUMBER>]
-```
-
-Example:
-
-```bash
-node scripts/check_vnetraffic.mjs --plate 51K12345 --type oto
-```
-
-**License plate entry rules:**
-- Always uppercase.
-- Remove `-` and `.` before calling the API.
-- Example: `51K-123.45` → `51K12345`.
-
-## Interpreting Results
-
-- If there are violations (`totalViolations > 0`):
-  - Give a summary: total count, pending, processed.
-  - List: time, location, status, authority, payment location.
-- If no violations or no data found:
-  - Clearly state no data found at the intermediary source.
-  - Recommend cross-checking official portals.
-
-## Reliability Warning
-
-- `vnetraffic.org` is an **intermediate, non-government source**.
-- Always clarify: Official conclusions should be cross-checked at:
-  - https://www.csgt.vn (National Traffic Police Portal)
-  - Vietnam Registry portals (when relevant)
-
-## Fallback if automation not possible
-
-If the endpoint errors, times out, or if an official portal requires CAPTCHA:
-1. Ask the user for a screenshot of their search result.
-2. Help interpret important result fields for the user.
-3. Briefly explain next steps—no scare tactics, no speculation.
