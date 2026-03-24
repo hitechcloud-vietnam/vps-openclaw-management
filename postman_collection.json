@@ -2368,6 +2368,175 @@
       ]
     },
     {
+      "name": "Secrets",
+      "item": [
+        {
+          "name": "Reload Secrets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/secrets/reload",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "secrets", "reload"]
+            },
+            "description": "Reload upstream secret references and retain last-known-good state on failure."
+          },
+          "response": []
+        },
+        {
+          "name": "Resolve Secrets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"commandName\": \"browser.proxy\",\n  \"targetIds\": [\"gateway\", \"talk\"]\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/secrets/resolve",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "secrets", "resolve"]
+            },
+            "description": "Resolve secret assignments for a command and target list through `secrets.resolve`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "System Presence",
+      "item": [
+        {
+          "name": "Get System Presence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/system/presence",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "system", "presence"]
+            },
+            "description": "Read upstream presence snapshots for connected hosts and modes through `system-presence`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Talk",
+      "item": [
+        {
+          "name": "Get Talk Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/talk/config?includeSecrets=false",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "talk", "config"],
+              "query": [
+                {
+                  "key": "includeSecrets",
+                  "value": "false"
+                }
+              ]
+            },
+            "description": "Read talk provider configuration through upstream `talk.config`."
+          },
+          "response": []
+        },
+        {
+          "name": "Speak Text",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"OpenClaw talk mode test audio.\",\n  \"voiceId\": \"default\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/talk/speak",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "talk", "speak"]
+            },
+            "description": "Generate speech audio via upstream `talk.speak`."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Talk Mode",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true,\n  \"phase\": \"interactive\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/talk/mode",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "talk", "mode"]
+            },
+            "description": "Enable or disable talk mode via upstream `talk.mode`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Update",
+      "item": [
+        {
+          "name": "Run Update",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Manual maintenance update\",\n  \"restartDelayMs\": 5000,\n  \"timeoutMs\": 120000\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/update/run",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "update", "run"]
+            },
+            "description": "Run the upstream update pipeline and schedule restart only on success."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Devices",
       "item": [
         {

@@ -2002,6 +2002,83 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
+  // POST /api/secrets/reload — Upstream secrets reload
+  // =========================================================================
+  if (route(req, 'POST', '/api/secrets/reload')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const result = gatewayMethod('secrets.reload', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'secrets.reload', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/secrets/resolve — Upstream secret target resolution
+  // =========================================================================
+  if (route(req, 'POST', '/api/secrets/resolve')) {
+    try {
+      const body = await parseBody(req);
+      const result = gatewayMethod('secrets.resolve', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'secrets.resolve', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/system/presence — Upstream system presence snapshot
+  // =========================================================================
+  if (route(req, 'GET', '/api/system/presence')) {
+    try {
+      const result = gatewayMethod('system-presence', {}, { timeoutMs: 30000 });
+      return json(res, 200, { ok: true, method: 'system-presence', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/talk/config — Upstream talk configuration snapshot
+  // =========================================================================
+  if (route(req, 'GET', '/api/talk/config')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
+      const result = gatewayMethod('talk.config', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'talk.config', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/talk/speak — Upstream talk speech synthesis
+  // =========================================================================
+  if (route(req, 'POST', '/api/talk/speak')) {
+    try {
+      const body = await parseBody(req);
+      const result = gatewayMethod('talk.speak', body, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
+      return json(res, 200, { ok: true, method: 'talk.speak', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/talk/mode — Upstream talk mode toggle
+  // =========================================================================
+  if (route(req, 'POST', '/api/talk/mode')) {
+    try {
+      const body = await parseBody(req);
+      const result = gatewayMethod('talk.mode', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'talk.mode', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/update/run — Upstream update execution
+  // =========================================================================
+  if (route(req, 'POST', '/api/update/run')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const result = gatewayMethod('update.run', body, { timeoutMs: Number(body.timeoutMs || 180000) || 180000 });
+      return json(res, 200, { ok: true, method: 'update.run', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
   // GET /api/providers — List tat ca providers (built-in + custom)
   // =========================================================================
   if (route(req, 'GET', '/api/providers')) {
