@@ -2266,6 +2266,29 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
+  // POST /api/runtime/agent — Upstream agent run/invoke
+  // =========================================================================
+  if (route(req, 'POST', '/api/runtime/agent')) {
+    try {
+      const body = await parseBody(req);
+      const params = {
+        ...body,
+        idempotencyKey: body.idempotencyKey || crypto.randomUUID()
+      };
+      const result = gatewayMethod('agent', params, {
+        timeoutMs: Number(body.timeoutMs || 120000) || 120000,
+        expectFinal: body.expectFinal === true
+      });
+      return json(res, 200, {
+        ok: true,
+        method: 'agent',
+        idempotencyKey: params.idempotencyKey,
+        result
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
   // POST /api/agent-runs/:runId/wait — Upstream agent run wait
   // =========================================================================
   if ((m = route(req, 'POST', '/api/agent-runs/:runId/wait'))) {
@@ -3795,6 +3818,48 @@ const server = http.createServer(async (req, res) => {
         expectFinal: body.expectFinal === true
       });
       return json(res, 200, { ok: true, method: 'node.invoke', nodeId: m.params.id, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/nodes/:id/invoke-result — Upstream node invoke result callback
+  // =========================================================================
+  if ((m = route(req, 'POST', '/api/nodes/:id/invoke-result'))) {
+    try {
+      const body = await parseBody(req);
+      const params = { nodeId: m.params.id, ...body };
+      const result = gatewayMethod('node.invoke.result', params, {
+        timeoutMs: Number(body.timeoutMs || 30000) || 30000
+      });
+      return json(res, 200, { ok: true, method: 'node.invoke.result', nodeId: m.params.id, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/nodes/:id/events — Upstream node event ingest
+  // =========================================================================
+  if ((m = route(req, 'POST', '/api/nodes/:id/events'))) {
+    try {
+      const body = await parseBody(req);
+      const params = { nodeId: m.params.id, ...body };
+      const result = gatewayMethod('node.event', params, {
+        timeoutMs: Number(body.timeoutMs || 30000) || 30000
+      });
+      return json(res, 200, { ok: true, method: 'node.event', nodeId: m.params.id, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/nodes/:id/canvas/capability/refresh — Upstream canvas capability refresh
+  // =========================================================================
+  if ((m = route(req, 'POST', '/api/nodes/:id/canvas/capability/refresh'))) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const params = { nodeId: m.params.id, ...body };
+      const result = gatewayMethod('node.canvas.capability.refresh', params, {
+        timeoutMs: Number(body.timeoutMs || 30000) || 30000
+      });
+      return json(res, 200, { ok: true, method: 'node.canvas.capability.refresh', nodeId: m.params.id, result });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 

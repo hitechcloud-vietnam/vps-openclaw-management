@@ -1489,6 +1489,29 @@
           "response": []
         },
         {
+          "name": "Run Agent For Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Summarize this session and suggest next steps\",\n  \"sessionKey\": \"main:demo-session\",\n  \"agentId\": \"main\",\n  \"expectFinal\": false\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/runtime/agent",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "runtime", "agent"]
+            },
+            "description": "Run the upstream `agent` method directly against a chosen session or delivery target. The API auto-generates `idempotencyKey` when omitted."
+          },
+          "response": []
+        },
+        {
           "name": "Delete Session",
           "request": {
             "method": "DELETE",
@@ -1587,6 +1610,75 @@
               "path": ["api", "nodes", "node-123", "invoke"]
             },
             "description": "Invoke an upstream node command via `node.invoke`."
+          },
+          "response": []
+        },
+        {
+          "name": "Submit Node Invoke Result",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"requestId\": \"invoke-123\",\n  \"ok\": true,\n  \"result\": {\n    \"stdout\": \"Linux node-123\\n\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/nodes/node-123/invoke-result",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "nodes", "node-123", "invoke-result"]
+            },
+            "description": "Submit a node execution result callback via upstream `node.invoke.result`."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Node Event",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"presence\",\n  \"status\": \"online\",\n  \"battery\": 92,\n  \"network\": \"wifi\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/nodes/node-123/events",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "nodes", "node-123", "events"]
+            },
+            "description": "Send a node-originated event into the gateway via upstream `node.event`."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Node Canvas Capability",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target\": \"control-ui\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/nodes/node-123/canvas/capability/refresh",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "nodes", "node-123", "canvas", "capability", "refresh"]
+            },
+            "description": "Refresh a node canvas capability token/window via upstream `node.canvas.capability.refresh`."
           },
           "response": []
         },
@@ -2827,6 +2919,29 @@
               "path": ["api", "agents", "identity", "resolve"]
             },
             "description": "Resolve display identity metadata for an agent or a session via upstream `agent.identity.get`."
+          },
+          "response": []
+        },
+        {
+          "name": "Run Agent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Generate a short operations summary\",\n  \"agentId\": \"main\",\n  \"sessionId\": \"ops-summary\",\n  \"expectFinal\": false\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/runtime/agent",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "runtime", "agent"]
+            },
+            "description": "Start an upstream `agent` run directly. This is useful for gateway-driven runs outside the local config-management APIs."
           },
           "response": []
         },
