@@ -1937,6 +1937,46 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
+  // POST /api/exec-approvals/requests — Upstream execution approval request
+  // =========================================================================
+  if (route(req, 'POST', '/api/exec-approvals/requests')) {
+    try {
+      const body = await parseBody(req);
+      const params = {
+        ...body,
+        twoPhase: body.twoPhase === undefined ? true : body.twoPhase
+      };
+      const result = gatewayMethod('exec.approval.request', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
+      return json(res, 200, { ok: true, method: 'exec.approval.request', result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/exec-approvals/requests/:id — Upstream execution approval wait/poll
+  // =========================================================================
+  if ((m = route(req, 'GET', '/api/exec-approvals/requests/:id'))) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const queryParams = normalizeGatewayParams(Object.fromEntries(url.searchParams));
+      const params = { ...queryParams, id: m.params.id };
+      const result = gatewayMethod('exec.approval.waitDecision', params, { timeoutMs: Number(queryParams.timeoutMs || 35000) || 35000 });
+      return json(res, 200, { ok: true, method: 'exec.approval.waitDecision', id: m.params.id, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/exec-approvals/requests/:id/decision — Upstream execution approval resolve
+  // =========================================================================
+  if ((m = route(req, 'POST', '/api/exec-approvals/requests/:id/decision'))) {
+    try {
+      const body = await parseBody(req);
+      const params = { ...body, id: m.params.id };
+      const result = gatewayMethod('exec.approval.resolve', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
+      return json(res, 200, { ok: true, method: 'exec.approval.resolve', id: m.params.id, result });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
   // POST /api/browser/request — Upstream browser request bridge
   // =========================================================================
   if (route(req, 'POST', '/api/browser/request')) {

@@ -2260,6 +2260,90 @@
             ],
             "body": {
               "mode": "raw",
+        },
+        {
+          "name": "Create Exec Approval Request",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"command\": \"npm run build\",\n  \"commandArgv\": [\"npm\", \"run\", \"build\"],\n  \"cwd\": \"/workspace\",\n  \"ask\": \"Allow build command?\",\n  \"host\": \"local\",\n  \"timeoutMs\": 120000,\n  \"twoPhase\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/exec-approvals/requests",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "exec-approvals",
+                "requests"
+              ]
+            }
+          },
+          "description": "Create a live execution approval request via upstream `exec.approval.request`. The wrapper defaults `twoPhase` to `true` when omitted."
+        },
+        {
+          "name": "Wait Exec Approval Decision",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/exec-approvals/requests/{{approvalId}}?timeoutMs=35000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "exec-approvals",
+                "requests",
+                "{{approvalId}}"
+              ],
+              "query": [
+                {
+                  "key": "timeoutMs",
+                  "value": "35000"
+                }
+              ]
+            }
+          },
+          "description": "Wait for or poll the final decision of an execution approval request via `exec.approval.waitDecision`. Approval state is held in gateway memory."
+        },
+        {
+          "name": "Resolve Exec Approval",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"allow-once\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/exec-approvals/requests/{{approvalId}}/decision",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "exec-approvals",
+                "requests",
+                "{{approvalId}}",
+                "decision"
+              ]
+            }
+          },
+          "description": "Resolve a pending execution approval via `exec.approval.resolve`. Supported decisions are `allow-once`, `allow-always`, and `deny`."
               "raw": "{\n  \"baseHash\": \"replace-with-node-hash\",\n  \"file\": {\n    \"version\": 1,\n    \"defaultMode\": \"prompt\",\n    \"allow\": [],\n    \"deny\": []\n  }\n}"
             },
             "url": {
