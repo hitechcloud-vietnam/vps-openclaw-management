@@ -1,66 +1,66 @@
 #!/bin/bash
 # =============================================================================
-# OpenClaw Bootstrap — Doi cloud-init xong, reboot, roi chay install.sh
+# OpenClaw Bootstrap — Wait for cloud-init, reboot, then run install.sh
 #
-# Usage (goi tu SSH):
+# Usage (run from SSH):
 #   curl -fsSL <url>/bootstrap.sh | bash -s -- --mgmt-key <KEY> [--domain <DOMAIN>]
 #
 # Flow:
-#   1. Doi cloud-init hoan tat
-#   2. Tai install.sh ve /opt/openclaw/
-#   3. Tao systemd one-shot service de chay install.sh sau reboot
+#   1. Wait for cloud-init to finish
+#   2. Download install.sh to /opt/openclaw/
+#   3. Create a systemd one-shot service to run install.sh after reboot
 #   4. Reboot VPS
-#   5. Sau reboot, systemd chay install.sh, xong thi tu disable service
+#   5. After reboot, systemd runs install.sh, then disables the service automatically
 #
-# Kiem tra tien trinh: tail -f /var/log/openclaw-install.log
+# Check progress: tail -f /var/log/openclaw-install.log
 # =============================================================================
 
-REPO_RAW="https://install-openclaw.codelab.vn"
+REPO_RAW="https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/main"
 BOOTSTRAP_DIR="/opt/openclaw"
 INSTALL_SCRIPT="${BOOTSTRAP_DIR}/openclaw-install.sh"
 INSTALL_ARGS="${BOOTSTRAP_DIR}/openclaw-install.args"
 LOG_FILE="/var/log/openclaw-install.log"
 SERVICE_NAME="openclaw-install"
 
-# Tao thu muc truoc
+# Create directory first
 mkdir -p "$BOOTSTRAP_DIR"
 
-# Luu arguments vao file de systemd doc lai sau reboot
+# Save arguments to file for systemd to read after reboot
 echo "$*" > "$INSTALL_ARGS"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bootstrap: $*" | tee -a "$LOG_FILE"; }
 
-log "Bat dau bootstrap..."
+log "Starting bootstrap..."
 
 # =============================================================================
-# 1. Doi cloud-init hoan tat
+# 1. Wait for cloud-init to finish
 # =============================================================================
-log "Doi cloud-init hoan tat..."
+log "Waiting for cloud-init to finish..."
 if command -v cloud-init &>/dev/null; then
     cloud-init status --wait 2>&1 | while IFS= read -r line; do
         log "cloud-init: $line"
     done
-    log "cloud-init da hoan tat."
+    log "cloud-init is done."
 else
-    log "cloud-init khong co, bo qua."
+    log "cloud-init not found, skipping."
 fi
 
 # =============================================================================
-# 2. Tai install.sh
+# 2. Download install.sh
 # =============================================================================
-log "Dang tai install.sh..."
+log "Downloading install.sh..."
 if ! curl -fsSL "${REPO_RAW}/install.sh" -o "$INSTALL_SCRIPT"; then
-    log "LOI - Khong tai duoc install.sh"
+    log "ERROR - Failed to download install.sh"
     exit 1
 fi
 chmod +x "$INSTALL_SCRIPT"
-log "Da tai install.sh thanh cong."
+log "Successfully downloaded install.sh."
 
 # =============================================================================
-# 3. Tao systemd one-shot service chay install.sh sau reboot
+# 3. Create systemd one-shot service to run install.sh after reboot
 # =============================================================================
-log "Luu arguments: $(cat "$INSTALL_ARGS")"
-log "Tao systemd service ${SERVICE_NAME} de chay sau reboot..."
+log "Saved arguments: $(cat "$INSTALL_ARGS")"
+log "Creating systemd service ${SERVICE_NAME} to run after reboot..."
 
 cat > /etc/systemd/system/${SERVICE_NAME}.service << 'SERVICEEOF'
 [Unit]
@@ -82,15 +82,15 @@ SERVICEEOF
 
 systemctl daemon-reload
 systemctl enable ${SERVICE_NAME}.service
-log "Service ${SERVICE_NAME} da duoc enable."
+log "Service ${SERVICE_NAME} has been enabled."
 
 # =============================================================================
 # 4. Reboot
 # =============================================================================
-log "Reboot VPS trong 5 giay..."
-log "Sau reboot, install se tu dong chay. Theo doi: tail -f ${LOG_FILE}"
+log "Rebooting VPS in 5 seconds..."
+log "After reboot, install will run automatically. Track progress with: tail -f ${LOG_FILE}"
 
-# Dung nohup + sleep de SSH co thoi gian return truoc khi reboot
+# Use nohup + sleep so SSH returns before rebooting
 nohup bash -c "sleep 5 && reboot" &>/dev/null &
 
-log "Bootstrap hoan tat. VPS se reboot ngay bay gio."
+log "Bootstrap complete. VPS will reboot now."

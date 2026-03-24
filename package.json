@@ -1,7 +1,7 @@
 {
-  "name": "tra-cuu-phat-nguoi",
+  "name": "traffic-fine-lookup-vn",
   "version": "1.0.0",
-  "description": "Tra cứu phạt nguội phương tiện tại Việt Nam (VNeTraffic)",
+  "description": "Traffic fine lookup for vehicles in Vietnam (VNeTraffic)",
   "type": "module",
   "bin": {
     "check-vnetraffic": "./scripts/check_vnetraffic.mjs"

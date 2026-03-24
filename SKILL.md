@@ -1,3 +1,12 @@
+# Traffic Fine Lookup VN - OpenClaw Skill
+
+This skill allows users to check traffic (fine) violations for Vietnamese vehicles (cars, motorbikes) by license plate using vnetraffic.org as an intermediary, with guidance to cross-verify on official portals.
+
+---
+
+## Script
+
+```javascript
 #!/usr/bin/env node
 
 import process from 'node:process';
@@ -26,7 +35,7 @@ function mapType(t = '') {
 }
 
 function usage() {
-  console.error('Usage: node scripts/check_vnetraffic.mjs --plate <BIENSO> --type <oto|xemay|xemaydien> [--phone <SODT>]');
+  console.error('Usage: node scripts/check_vnetraffic.mjs --plate <LICENSE_PLATE> --type <oto|xemay|xemaydien> [--phone <PHONE_NUMBER>]');
 }
 
 async function main() {
@@ -78,73 +87,77 @@ main().catch((err) => {
   console.error(JSON.stringify({ ok: false, error: String(err?.message || err) }, null, 2));
   process.exit(1);
 });
+```
 
-# Tra Cứu Phạt Nguội
+---
 
-Đây là một skill của OpenClaw dùng để tra cứu phạt nguội giao thông (ô tô, xe máy) tại Việt Nam.
+## Description
 
-## Cài đặt & Sử dụng
+This is an OpenClaw skill to look up traffic violations (fines) for vehicles in Vietnam.
 
-Xem file `SKILL.md` để biết thêm chi tiết về cách chạy và kiểm tra kết quả tra cứu.
+### Installation & Usage
 
-## Thông tin Publish
+See the `SKILL.md` file for more details on running and interpreting lookup results.
 
-Để publish skill này lên ClawHub, bạn có thể sử dụng lệnh sau:
+### Publishing Info
+
+To publish this skill to ClawHub:
 
 ```bash
 clawhub publish . \
-  --slug tra-cuu-phat-nguoi \
-  --name "Tra Cuu Phat Nguoi" \
+  --slug traffic-fine-lookup-vn \
+  --name "Traffic Fine Lookup VN" \
   --version 1.0.0 \
   --changelog "Privacy remove"
 ```
+
 ---
-name: tra-cuu-phat-nguoi-vn
-description: Tra cứu phạt nguội phương tiện tại Việt Nam. Use when user asks to check traffic fines in VN by license plate (ô tô/xe máy), especially via VNeTraffic-style lookup and CSGT cross-check guidance.
+name: traffic-fine-lookup-vn
+description: Lookup traffic fines for vehicles in Vietnam. Use when the user asks to check traffic fines in VN by license plate (car/motorbike), especially via VNeTraffic-style lookup and CSGT cross-verification guidance.
 ---
 
-# Tra cứu phạt nguội VN
+# Lookup Vietnam Traffic Fines
 
-Tra cứu nhanh bằng endpoint của VNeTraffic, sau đó hướng dẫn đối chiếu nguồn chính thống (CSGT/Đăng kiểm) khi cần xác nhận.
+Quick check using the VNeTraffic endpoint, then guide users to cross-confirm via official portals (CSGT/Registry) for formal verification.
 
-## Chạy tra cứu nhanh
+## Quick lookup
 
-Dùng script:
+Use the script:
 
 ```bash
-node scripts/check_vnetraffic.mjs --plate <BIENSO> --type <oto|xemay|xemaydien> [--phone <SODT>]
+node scripts/check_vnetraffic.mjs --plate <LICENSE_PLATE> --type <oto|xemay|xemaydien> [--phone <PHONE_NUMBER>]
 ```
 
-Ví dụ:
+Example:
 
 ```bash
 node scripts/check_vnetraffic.mjs --plate 51K12345 --type oto
 ```
 
-Quy tắc nhập biển số:
-- Chuẩn hóa về chữ hoa.
-- Bỏ dấu `-` và `.` trước khi gửi API.
-- Ví dụ: `51K-123.45` -> `51K12345`.
+**License plate entry rules:**
+- Always uppercase.
+- Remove `-` and `.` before calling the API.
+- Example: `51K-123.45` → `51K12345`.
 
-## Diễn giải kết quả
+## Interpreting Results
 
-- Nếu có lỗi vi phạm (`totalViolations > 0`):
-  - Tóm tắt: tổng số lỗi, số chưa xử phạt, số đã xử phạt.
-  - Liệt kê: thời gian, địa điểm, trạng thái, đơn vị xử lý, nơi nộp phạt.
-- Nếu không có lỗi hoặc không có dữ liệu:
-  - Báo rõ là chưa thấy dữ liệu trên nguồn tra cứu trung gian.
-  - Khuyến nghị đối chiếu lại trên cổng chính thống.
+- If there are violations (`totalViolations > 0`):
+  - Give a summary: total count, pending, processed.
+  - List: time, location, status, authority, payment location.
+- If no violations or no data found:
+  - Clearly state no data found at the intermediary source.
+  - Recommend cross-checking official portals.
 
-## Cảnh báo độ tin cậy
+## Reliability Warning
 
-- `vnetraffic.org` là nguồn trung gian, không phải cổng nhà nước chính thức.
-- Luôn nói rõ: kết luận chính thức nên đối chiếu tại:
-  - https://www.csgt.vn (Tra cứu phạt nguội)
-  - Cổng tra cứu của Cục Đăng Kiểm (khi phù hợp)
+- `vnetraffic.org` is an **intermediate, non-government source**.
+- Always clarify: Official conclusions should be cross-checked at:
+  - https://www.csgt.vn (National Traffic Police Portal)
+  - Vietnam Registry portals (when relevant)
 
-## Fallback khi không thể tự động hóa
+## Fallback if automation not possible
 
-Nếu endpoint lỗi, timeout, hoặc trang chính thống yêu cầu CAPTCHA:
-1. Xin user chụp màn hình kết quả tra cứu.
-2. Đọc/diễn giải giúp user các trường quan trọng.
-3. Nhắc bước xử lý tiếp theo ngắn gọn, không dọa, không suy diễn.
+If the endpoint errors, times out, or if an official portal requires CAPTCHA:
+1. Ask the user for a screenshot of their search result.
+2. Help interpret important result fields for the user.
+3. Briefly explain next steps—no scare tactics, no speculation.

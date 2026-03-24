@@ -1,17 +1,17 @@
-# Hướng dẫn cập nhật OpenClaw
+# OpenClaw Upgrade Guide
 
-## Mục lục
+## Table of Contents
 
-- [1. Cập nhật qua Management API (khuyên dùng)](#1-cập-nhật-qua-management-api-khuyên-dùng)
-- [2. Cập nhật thủ công qua SSH](#2-cập-nhật-thủ-công-qua-ssh)
-- [3. Cập nhật Docker image OpenClaw](#3-cập-nhật-docker-image-openclaw)
-- [4. Kiểm tra sau khi cập nhật](#4-kiểm-tra-sau-khi-cập-nhật)
+- [1. Upgrade via Management API (Recommended)](#1-upgrade-via-management-api-recommended)
+- [2. Manual Upgrade via SSH](#2-manual-upgrade-via-ssh)
+- [3. Upgrade OpenClaw Docker Image](#3-upgrade-openclaw-docker-image)
+- [4. Post-Update Checklist](#4-post-update-checklist)
 
 ---
 
-## 1. Cập nhật qua Management API (khuyên dùng)
+## 1. Upgrade via Management API (Recommended)
 
-Gọi endpoint `/api/self-update` để tự động download phiên bản mới nhất từ GitHub và restart service.
+Call the `/api/self-update` endpoint to automatically download the latest version from GitHub and restart the service.
 
 ```bash
 MGMT_KEY="<your_mgmt_api_key>"
@@ -22,7 +22,7 @@ curl -X POST \
   http://$VPS_IP:9998/api/self-update
 ```
 
-**Response thành công:**
+**Successful response:**
 
 ```json
 {
@@ -33,34 +33,34 @@ curl -X POST \
     { "file": "/opt/openclaw/docker-compose.yml", "ok": true },
     { "file": "/etc/openclaw/config/anthropic.json", "ok": true },
     { "file": "/etc/openclaw/config/openai.json", "ok": true },
-    { "file": "/etc/openclaw/config/gemini.json", "ok": true },
+    { "file": "/etc/openclaw/config/gemini.json", "ok": true }
   ]
 }
 ```
 
-**Các file được cập nhật:**
+**Files updated:**
 
-| File | Đường dẫn trên VPS | Mô tả |
-|------|-------------------|-------|
-| server.js | `/opt/openclaw-mgmt/server.js` | Management API server |
-| docker-compose.yml | `/opt/openclaw/docker-compose.yml` | Docker Compose config |
-| anthropic.json | `/etc/openclaw/config/anthropic.json` | Template config Anthropic |
-| openai.json | `/etc/openclaw/config/openai.json` | Template config OpenAI |
-| gemini.json | `/etc/openclaw/config/gemini.json` | Template config Gemini |
+| File                | Path on VPS                             | Description                |
+|---------------------|-----------------------------------------|----------------------------|
+| server.js           | `/opt/openclaw-mgmt/server.js`          | Management API server      |
+| docker-compose.yml  | `/opt/openclaw/docker-compose.yml`      | Docker Compose config      |
+| anthropic.json      | `/etc/openclaw/config/anthropic.json`   | Anthropic template config  |
+| openai.json         | `/etc/openclaw/config/openai.json`      | OpenAI template config     |
+| gemini.json         | `/etc/openclaw/config/gemini.json`      | Gemini template config     |
 
-> **Lưu ý:** Management API tự restart sau khi cập nhật. Kết nối có thể mất 2-3 giây trong lúc restart.
+> **Note:** The Management API will restart itself after updating. Connection may be lost for 2-3 seconds during restart.
 
 ---
 
-## 2. Cập nhật thủ công qua SSH
+## 2. Manual Upgrade via SSH
 
-Nếu Management API không hoạt động hoặc bạn muốn cập nhật thủ công:
+If Management API is not running or you want to upgrade manually:
 
 ```bash
 ssh root@<VPS_IP>
 ```
 
-### Bước 1: Download file mới từ GitHub
+### Step 1: Download new files from GitHub
 
 ```bash
 REPO_RAW="https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/main"
@@ -78,27 +78,27 @@ curl -fsSL "$REPO_RAW/config/gemini.json" -o /etc/openclaw/config/gemini.json
 curl -fsSL "$REPO_RAW/config/chatgpt.json" -o /etc/openclaw/config/chatgpt.json
 ```
 
-### Bước 2: Restart Management API
+### Step 2: Restart Management API
 
 ```bash
 systemctl restart openclaw-mgmt
 systemctl status openclaw-mgmt
 ```
 
-### Bước 3: Áp dụng thay đổi Docker Compose (nếu có service mới)
+### Step 3: Apply Docker Compose changes (if new services are added)
 
 ```bash
 cd /opt/openclaw
 docker compose up -d
 ```
 
-Lệnh `docker compose up -d` sẽ tự tạo thêm container mới nếu `docker-compose.yml` có thêm service, mà không ảnh hưởng container đang chạy.
+The `docker compose up -d` command will automatically create new containers if your `docker-compose.yml` has new services, without affecting running containers.
 
 ---
 
-## 3. Cập nhật Docker image OpenClaw
+## 3. Upgrade OpenClaw Docker Image
 
-Để cập nhật Docker image OpenClaw (không phải Management API), dùng endpoint `/api/upgrade`:
+To upgrade the OpenClaw Docker image (not the Management API), use the `/api/upgrade` endpoint:
 
 ```bash
 curl -X POST \
@@ -106,7 +106,7 @@ curl -X POST \
   http://$VPS_IP:9998/api/upgrade
 ```
 
-Hoặc thủ công qua SSH:
+Or manually via SSH:
 
 ```bash
 cd /opt/openclaw
@@ -116,25 +116,25 @@ docker compose up -d openclaw
 
 ---
 
-## 4. Kiểm tra sau khi cập nhật
+## 4. Post-Update Checklist
 
-### Kiểm tra Management API
+### Check Management API
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/status
 ```
 
-### Kiểm tra container
+### Check containers
 
 ```bash
-# Qua API
+# Via API
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/status
 
-# Qua SSH
+# Via SSH
 docker ps
 ```
 
-### Kiểm tra logs nếu có lỗi
+### Check logs if errors occur
 
 ```bash
 # Management API logs

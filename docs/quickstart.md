@@ -1,51 +1,51 @@
-# Bắt đầu nhanh với OpenClaw
+# Quick Start with OpenClaw
 
-## Mục lục
+## Table of Contents
 
-- [1. Truy cập Dashboard](#1-truy-cập-dashboard)
-- [2. Thêm API Key AI](#2-thêm-api-key-ai)
-- [3. Gửi tin nhắn đầu tiên](#3-gửi-tin-nhắn-đầu-tiên)
-- [4. Đổi model AI](#4-đổi-model-ai)
-- [5. Cấu trúc thư mục trên VPS](#5-cấu-trúc-thư-mục-trên-vps)
-- [6. Các lệnh quản lý cơ bản](#6-các-lệnh-quản-lý-cơ-bản)
-
----
-
-## 1. Truy cập Dashboard
-
-Sau khi VPS được cài đặt xong, bạn truy cập Dashboard qua trình duyệt:
-
-```
-https://<domain-hoặc-ip>?token=<gateway-token>
-```
-
-**Ví dụ:**
-- Có domain: `https://openclaw.example.com?token=abc123...`
-- Chỉ có IP: `https://180.93.138.155?token=abc123...`
-
-> **Lưu ý:** Nếu dùng IP (không có domain), trình duyệt sẽ cảnh báo chứng chỉ SSL tự ký — bấm **"Advanced"** → **"Proceed"** để tiếp tục.
-
-**Thông tin đăng nhập** được cung cấp trong panel quản lý tại my.hitechcloud.vn:
-- **Gateway Token** — dùng để truy cập Dashboard
-- **Management API Key** — do hệ thống my.hitechcloud.vn sinh ra và quản lý, dùng để kết nối panel với VPS
-
-> **Quan trọng:** Không tự thay đổi hoặc xóa `OPENCLAW_MGMT_API_KEY` trong file `.env` trên VPS. Nếu thay đổi, panel my.hitechcloud.vn sẽ không kết nối được với VPS.
+- [1. Access Dashboard](#1-access-dashboard)
+- [2. Add AI API Key](#2-add-ai-api-key)
+- [3. Send Your First Message](#3-send-your-first-message)
+- [4. Change AI Model](#4-change-ai-model)
+- [5. Directory Structure on VPS](#5-directory-structure-on-vps)
+- [6. Basic Management Commands](#6-basic-management-commands)
 
 ---
 
-## 2. Thêm API Key AI
+## 1. Access Dashboard
 
-OpenClaw cần API key của nhà cung cấp AI để hoạt động. Hỗ trợ 3 nhà cung cấp:
+After VPS installation, access your Dashboard via browser:
 
-| Nhà cung cấp | Lấy API key tại |
-|---|---|
-| Anthropic (Claude) | https://console.anthropic.com/settings/keys |
-| OpenAI (GPT) | https://platform.openai.com/api-keys |
-| Google (Gemini) | https://aistudio.google.com/apikey |
+```
+https://<domain-or-ip>?token=<gateway-token>
+```
 
-### Thêm API key qua panel my.hitechcloud.vn
+**Examples:**
+- With domain: `https://openclaw.example.com?token=abc123...`
+- IP only: `https://180.93.138.155?token=abc123...`
 
-Panel my.hitechcloud.vn sẽ gọi Management API để cập nhật key:
+> **Note:** If using IP (no domain), your browser will warn about self-signed SSL—click **"Advanced"** → **"Proceed"** to continue.
+
+**Login information** is given in the management panel at my.hitechcloud.vn:
+- **Gateway Token** — used to access the Dashboard
+- **Management API Key** — generated and managed by my.hitechcloud.vn, used to connect the panel to the VPS
+
+> **Important:** Do not manually change or delete `OPENCLAW_MGMT_API_KEY` in the `.env` file on your VPS. If changed, the panel at my.hitechcloud.vn will not be able to connect to your VPS.
+
+---
+
+## 2. Add AI API Key
+
+OpenClaw requires an API key from your selected AI provider to function. Three providers are supported:
+
+| Provider              | Get API key at                             |
+|-----------------------|--------------------------------------------|
+| Anthropic (Claude)    | https://console.anthropic.com/settings/keys|
+| OpenAI (GPT)          | https://platform.openai.com/api-keys       |
+| Google (Gemini)       | https://aistudio.google.com/apikey         |
+
+### Add API key via my.hitechcloud.vn panel
+
+The panel will call the Management API to update your key:
 
 ```bash
 MGMT_KEY="<management-api-key>"
@@ -58,7 +58,7 @@ curl -X PUT \
   http://$VPS_IP:9998/api/config/api-key
 ```
 
-**Kiểm tra key hợp lệ trước khi lưu:**
+**Check key validity before saving:**
 
 ```bash
 curl -X POST \
@@ -68,22 +68,22 @@ curl -X POST \
   http://$VPS_IP:9998/api/config/test-key
 ```
 
-Kết quả: `{"ok": true}` nếu key hợp lệ.
+Result: `{"ok": true}` if the key is valid.
 
 ---
 
-## 3. Gửi tin nhắn đầu tiên
+## 3. Send Your First Message
 
-1. Truy cập Dashboard bằng URL ở bước 1
-2. Đảm bảo đã thêm API key ở bước 2
-3. Gõ tin nhắn vào ô chat và nhấn Enter
-4. OpenClaw sẽ trả lời bằng AI model đang được cấu hình
+1. Access the Dashboard with the URL from Step 1
+2. Ensure you've added your API key as in Step 2
+3. Type a message in the chat box and press Enter
+4. OpenClaw will reply using the configured AI model
 
 ---
 
-## 4. Đổi model AI
+## 4. Change AI Model
 
-Mặc định OpenClaw sử dụng `anthropic/claude-opus-4-5`. Để đổi model:
+OpenClaw uses `anthropic/claude-opus-4-5` by default. To switch models:
 
 ```bash
 curl -X PUT \
@@ -93,27 +93,27 @@ curl -X PUT \
   http://$VPS_IP:9998/api/config/provider
 ```
 
-> Xem thêm danh sách model tại [Cấu hình chi tiết](cau-hinh.md).
+> See more model options in [Detailed Configuration](cau-hinh.md).
 
 ---
 
-## 5. Cấu trúc thư mục trên VPS
+## 5. Directory Structure on VPS
 
 ```
-/opt/openclaw/                          # Thư mục chính
-├── docker-compose.yml                  # Cấu hình Docker services
-├── Caddyfile                           # Cấu hình reverse proxy + SSL
-├── .env                                # Biến môi trường (tokens, API keys)
+/opt/openclaw/                          # Main directory
+├── docker-compose.yml                  # Docker services config
+├── Caddyfile                           # Reverse proxy + SSL config
+├── .env                                # Environment variables (tokens, API keys)
 ├── config/
-│   ├── openclaw.json                   # Cấu hình hiện tại (model, gateway, browser)
+│   ├── openclaw.json                   # Current configuration (model, gateway, browser)
 │   └── agents/main/agent/
-│       └── auth-profiles.json          # API keys (format chuẩn OpenClaw)
-└── data/                               # Dữ liệu lưu trữ
+│       └── auth-profiles.json          # API keys (OpenClaw standard format)
+└── data/                               # Persistent data
 
 /opt/openclaw-mgmt/
 └── server.js                           # Management API (port 9998)
 
-/etc/openclaw/config/                   # Template cấu hình (không sửa)
+/etc/openclaw/config/                   # Configuration templates (do not edit)
 ├── anthropic.json
 ├── openai.json
 └── gemini.json
@@ -121,33 +121,33 @@ curl -X PUT \
 
 ---
 
-## 6. Các lệnh quản lý cơ bản
+## 6. Basic Management Commands
 
-SSH vào VPS và chạy:
+SSH into your VPS and run:
 
 ```bash
 cd /opt/openclaw
 
-# Xem logs
+# View logs
 docker compose logs -f openclaw
 
 # Restart
 docker compose restart openclaw
 
-# Cập nhật phiên bản mới
+# Update to latest version
 docker compose pull && docker compose up -d
 
-# Dừng tất cả
+# Stop everything
 docker compose down
 ```
 
-> Xem thêm tại [Quản lý VPS & Docker](quan-ly-vps.md).
+> See more in [VPS & Docker Management](quan-ly-vps.md).
 
 ---
 
-## Bước tiếp theo
+## Next Steps
 
-- [Cấu hình chi tiết](cau-hinh.md) — Đổi model, cấu hình gateway, browser
-- [Kết nối kênh nhắn tin](kenh-nhan-tin.md) — Telegram, Discord, Zalo, Slack
-- [Quản lý VPS & Docker](quan-ly-vps.md) — Domain, SSL, Docker commands
-- [Tham chiếu API](api-reference.md) — Danh sách đầy đủ API endpoints
+- [Detailed Configuration](cau-hinh.md) — Change model, configure gateway, browser
+- [Messaging Channels Connection](kenh-nhan-tin.md) — Telegram, Discord, Zalo, Slack
+- [VPS & Docker Management](quan-ly-vps.md) — Domain, SSL, Docker commands
+- [API Reference](api-reference.md) — Full API endpoints list
