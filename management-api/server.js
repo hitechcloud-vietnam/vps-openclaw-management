@@ -1040,6 +1040,122 @@ function gatewayMethod(method, params = {}, options = {}) {
   return parseCliJsonOutput(output);
 }
 
+function openclawCli(args = [], options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const output = dockerExecArgs(['node', 'dist/index.js', ...args], Math.max(timeoutMs, 15000));
+  return options.json ? parseCliJsonOutput(output) : output;
+}
+
+function collectNestedValuesByKey(value, keyName, results = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectNestedValuesByKey(item, keyName, results);
+    return results;
+  }
+  if (!isPlainObject(value)) return results;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === keyName) results.push(item);
+    collectNestedValuesByKey(item, keyName, results);
+  }
+  return results;
+}
+
+function validateZaloConfigInput(value) {
+  const errors = [];
+  if (!isPlainObject(value)) {
+    return ['Zalo config patch must be an object'];
+  }
+
+  for (const webhookUrl of collectNestedValuesByKey(value, 'webhookUrl')) {
+    if (webhookUrl === null || webhookUrl === undefined || webhookUrl === '') continue;
+    if (typeof webhookUrl !== 'string' || !/^https:\/\//i.test(webhookUrl.trim())) {
+      errors.push('Zalo webhookUrl must use HTTPS');
+      break;
+    }
+  }
+
+  for (const webhookSecret of collectNestedValuesByKey(value, 'webhookSecret')) {
+    if (webhookSecret === null || webhookSecret === undefined || webhookSecret === '') continue;
+    if (typeof webhookSecret !== 'string' || webhookSecret.length < 8 || webhookSecret.length > 256) {
+      errors.push('Zalo webhookSecret must be 8-256 characters');
+      break;
+    }
+  }
+
+  for (const mediaMaxMb of collectNestedValuesByKey(value, 'mediaMaxMb')) {
+    if (mediaMaxMb === null || mediaMaxMb === undefined || mediaMaxMb === '') continue;
+    const parsed = Number(mediaMaxMb);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      errors.push('Zalo mediaMaxMb must be a positive number');
+      break;
+    }
+  }
+
+  const dmPolicies = collectNestedValuesByKey(value, 'dmPolicy');
+  for (const dmPolicy of dmPolicies) {
+    if (dmPolicy === null || dmPolicy === undefined || dmPolicy === '') continue;
+    if (!['pairing', 'allowlist', 'open', 'disabled'].includes(String(dmPolicy))) {
+      errors.push('Zalo dmPolicy must be one of: pairing, allowlist, open, disabled');
+      break;
+    }
+  }
+
+  const groupPolicies = collectNestedValuesByKey(value, 'groupPolicy');
+  for (const groupPolicy of groupPolicies) {
+    if (groupPolicy === null || groupPolicy === undefined || groupPolicy === '') continue;
+    if (!['allowlist', 'open', 'disabled'].includes(String(groupPolicy))) {
+      errors.push('Zalo groupPolicy must be one of: allowlist, open, disabled');
+      break;
+    }
+  }
+
+  return errors;
+}
+
+function buildZaloChannelState() {
+  const config = readConfig();
+  const channelConfig = deepClone(config?.channels?.zalo || {});
+  const envToken = getEnvValue('ZALO_BOT_TOKEN');
+  const defaultAccountToken = getValueAtPath(channelConfig, 'accounts.default.botToken');
+  const defaultAccountDmPolicy = getValueAtPath(channelConfig, 'accounts.default.dmPolicy');
+  const webhookUrls = collectNestedValuesByKey(channelConfig, 'webhookUrl').filter(value => typeof value === 'string' && value.trim());
+  const webhookPaths = collectNestedValuesByKey(channelConfig, 'webhookPath').filter(value => typeof value === 'string' && value.trim());
+  const accountIds = isPlainObject(channelConfig.accounts) ? Object.keys(channelConfig.accounts) : [];
+  const effectiveToken = typeof channelConfig.botToken === 'string'
+    ? channelConfig.botToken
+    : (defaultAccountToken.exists && typeof defaultAccountToken.value === 'string' ? defaultAccountToken.value : envToken);
+
+  return {
+    plugin: {
+      required: true,
+      package: '@openclaw/zalo',
+      enabled: !!config?.plugins?.entries?.zalo?.enabled
+    },
+    env: {
+      botToken: envToken ? sanitizeKey(envToken) : null
+    },
+    config: redactSensitiveData(channelConfig),
+    summary: {
+      enabled: !!channelConfig.enabled,
+      configured: !!effectiveToken,
+      transportMode: webhookUrls.length > 0 ? 'webhook' : 'polling',
+      webhookConfigured: webhookUrls.length > 0,
+      webhookPaths,
+      accountIds,
+      defaultDmPolicy: defaultAccountDmPolicy.exists ? defaultAccountDmPolicy.value : (channelConfig.dmPolicy || 'pairing'),
+      mediaMaxMb: channelConfig.mediaMaxMb || 5,
+      groupSupport: 'marketplace-bot-not-available'
+    },
+    notes: {
+      experimental: true,
+      dmPairingDefault: true,
+      groupsSupported: false,
+      textChunkLimit: 2000,
+      streamingBlockedByDefault: true,
+      webhookRequiresHttps: true
+    }
+  };
+}
+
 function getContainerStatus() {
   try {
     const out = shell(`docker inspect openclaw --format '{{.State.Status}} {{.State.StartedAt}}' 2>/dev/null`);
@@ -3109,6 +3225,255 @@ const server = http.createServer(async (req, res) => {
 
       restartContainer('openclaw');
       return json(res, 200, { ok: true, channel, removed: true });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/channels/zalo/plugin/install — Install Zalo plugin inside OpenClaw
+  // =========================================================================
+  if (route(req, 'POST', '/api/channels/zalo/plugin/install')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const spec = String(body.spec || '@openclaw/zalo').trim();
+      const allowedSpecs = ['@openclaw/zalo', './extensions/zalo'];
+      if (!allowedSpecs.includes(spec)) {
+        return json(res, 400, { ok: false, error: `Unsupported Zalo plugin spec. Use one of: ${allowedSpecs.join(', ')}` });
+      }
+
+      const output = openclawCli(['plugins', 'install', spec], { timeoutMs: Number(body.timeoutMs || 180000) || 180000 });
+
+      const config = readConfig();
+      if (!config.plugins) config.plugins = { entries: {} };
+      if (!config.plugins.entries) config.plugins.entries = {};
+      config.plugins.entries.zalo = { ...(config.plugins.entries.zalo || {}), enabled: true };
+      writeConfig(config);
+
+      const restarted = body.restart !== false;
+      if (restarted) restartContainer('openclaw');
+
+      return json(res, 200, {
+        ok: true,
+        channel: 'zalo',
+        plugin: spec,
+        restarted,
+        output,
+        state: buildZaloChannelState()
+      });
+    } catch (e) {
+      const stderr = e.stderr ? e.stderr.toString() : '';
+      const stdout = e.stdout ? e.stdout.toString() : '';
+      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
+    }
+  }
+
+  // =========================================================================
+  // GET /api/channels/zalo/config — Return local Zalo config snapshot
+  // =========================================================================
+  if (route(req, 'GET', '/api/channels/zalo/config')) {
+    try {
+      return json(res, 200, { ok: true, channel: 'zalo', state: buildZaloChannelState() });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // PATCH /api/channels/zalo/config — Merge local Zalo config and enable plugin
+  // =========================================================================
+  if (route(req, 'PATCH', '/api/channels/zalo/config')) {
+    try {
+      const body = await parseBody(req);
+      const patch = isPlainObject(body.patch) ? deepClone(body.patch) : deepClone(body);
+      delete patch.patch;
+      delete patch.restart;
+      delete patch.removeEnvToken;
+      delete patch.syncEnvDefaultToken;
+      delete patch.timeoutMs;
+
+      const validationErrors = validateZaloConfigInput(patch);
+      if (validationErrors.length > 0) {
+        return json(res, 400, { ok: false, error: validationErrors[0], errors: validationErrors });
+      }
+
+      const config = readConfig();
+      if (!config.channels) config.channels = {};
+      const current = isPlainObject(config.channels.zalo) ? config.channels.zalo : {};
+      const merged = deepMerge(current, patch);
+
+      if (merged.enabled === undefined) merged.enabled = true;
+      const defaultDmPolicy = getValueAtPath(merged, 'accounts.default.dmPolicy');
+      if (!defaultDmPolicy.exists && !merged.dmPolicy) {
+        if (isPlainObject(merged.accounts?.default)) {
+          merged.accounts.default.dmPolicy = 'pairing';
+        } else {
+          merged.dmPolicy = 'pairing';
+        }
+      }
+
+      const rootTokenPatch = getValueAtPath(patch, 'botToken');
+      const defaultTokenPatch = getValueAtPath(patch, 'accounts.default.botToken');
+      if (body.removeEnvToken === true) {
+        removeEnvValue('ZALO_BOT_TOKEN');
+      } else if (rootTokenPatch.exists && typeof rootTokenPatch.value === 'string' && rootTokenPatch.value.trim()) {
+        setEnvValue('ZALO_BOT_TOKEN', rootTokenPatch.value.trim());
+      } else if (defaultTokenPatch.exists && typeof defaultTokenPatch.value === 'string' && defaultTokenPatch.value.trim() && body.syncEnvDefaultToken !== false) {
+        setEnvValue('ZALO_BOT_TOKEN', defaultTokenPatch.value.trim());
+      }
+
+      config.channels.zalo = merged;
+      if (!config.plugins) config.plugins = { entries: {} };
+      if (!config.plugins.entries) config.plugins.entries = {};
+      config.plugins.entries.zalo = { ...(config.plugins.entries.zalo || {}), enabled: true };
+      writeConfig(config);
+
+      const restarted = body.restart !== false;
+      if (restarted) restartContainer('openclaw');
+
+      return json(res, 200, { ok: true, channel: 'zalo', restarted, state: buildZaloChannelState() });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/channels/zalo/status — Filtered gateway channel status for Zalo
+  // =========================================================================
+  if (route(req, 'GET', '/api/channels/zalo/status')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const query = normalizeGatewayParams(Object.fromEntries(url.searchParams));
+      const result = gatewayMethod('channels.status', { ...query, probe: query.probe === undefined ? true : query.probe }, { timeoutMs: Number(query.timeout || query.timeoutMs || 20000) || 20000 });
+      const filtered = isPlainObject(result) && Array.isArray(result.channels)
+        ? { ...result, channels: result.channels.filter(item => item && item.channel === 'zalo') }
+        : result;
+      return json(res, 200, { ok: true, channel: 'zalo', method: 'channels.status', result: filtered });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/channels/zalo/webhook/config — Local webhook visibility for Zalo
+  // =========================================================================
+  if (route(req, 'GET', '/api/channels/zalo/webhook/config')) {
+    try {
+      const state = buildZaloChannelState();
+      const config = state.config || {};
+      const rootWebhookUrl = getValueAtPath(config, 'webhookUrl');
+      const rootWebhookPath = getValueAtPath(config, 'webhookPath');
+      const rootWebhookSecret = getValueAtPath(config, 'webhookSecret');
+      const defaultWebhookUrl = getValueAtPath(config, 'accounts.default.webhookUrl');
+      const defaultWebhookPath = getValueAtPath(config, 'accounts.default.webhookPath');
+      const defaultWebhookSecret = getValueAtPath(config, 'accounts.default.webhookSecret');
+
+      return json(res, 200, {
+        ok: true,
+        channel: 'zalo',
+        webhook: {
+          mode: state.summary.transportMode,
+          configured: state.summary.webhookConfigured,
+          root: {
+            webhookUrl: rootWebhookUrl.exists ? rootWebhookUrl.value : null,
+            webhookPath: rootWebhookPath.exists ? rootWebhookPath.value : null,
+            secretConfigured: !!(rootWebhookSecret.exists && rootWebhookSecret.value)
+          },
+          defaultAccount: {
+            webhookUrl: defaultWebhookUrl.exists ? defaultWebhookUrl.value : null,
+            webhookPath: defaultWebhookPath.exists ? defaultWebhookPath.value : null,
+            secretConfigured: !!(defaultWebhookSecret.exists && defaultWebhookSecret.value)
+          },
+          constraints: {
+            httpsRequired: true,
+            secretLength: '8-256 chars',
+            pollingAndWebhookMutuallyExclusive: true
+          }
+        }
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/channels/zalo/pairings — List pending/approved Zalo pairings
+  // =========================================================================
+  if (route(req, 'GET', '/api/channels/zalo/pairings')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const account = url.searchParams.get('account');
+      const args = ['pairing', 'list', 'zalo'];
+      if (account) args.push('--account', account);
+      args.push('--json');
+      const result = openclawCli(args, { timeoutMs: Number(url.searchParams.get('timeoutMs') || 20000) || 20000, json: true });
+      return json(res, 200, { ok: true, channel: 'zalo', method: 'pairing.list', result });
+    } catch (e) {
+      const stderr = e.stderr ? e.stderr.toString() : '';
+      const stdout = e.stdout ? e.stdout.toString() : '';
+      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
+    }
+  }
+
+  // =========================================================================
+  // POST /api/channels/zalo/pairings/approve — Approve a Zalo pairing code
+  // =========================================================================
+  if (route(req, 'POST', '/api/channels/zalo/pairings/approve')) {
+    try {
+      const body = await parseBody(req);
+      const code = String(body.code || '').trim();
+      if (!code) return json(res, 400, { ok: false, error: 'Missing code' });
+
+      const args = ['pairing', 'approve', 'zalo', code];
+      if (body.account) args.push('--account', String(body.account));
+      if (body.notify === true) args.push('--notify');
+
+      const output = openclawCli(args, { timeoutMs: Number(body.timeoutMs || 20000) || 20000 });
+      return json(res, 200, {
+        ok: true,
+        channel: 'zalo',
+        method: 'pairing.approve',
+        code,
+        result: parseCliJsonOutput(output)
+      });
+    } catch (e) {
+      const stderr = e.stderr ? e.stderr.toString() : '';
+      const stdout = e.stdout ? e.stdout.toString() : '';
+      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
+    }
+  }
+
+  // =========================================================================
+  // GET /api/channels/zalo/diagnostics — Consolidated Zalo snapshot
+  // =========================================================================
+  if (route(req, 'GET', '/api/channels/zalo/diagnostics')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const timeoutMs = Number(url.searchParams.get('timeoutMs') || 20000) || 20000;
+      const diagnostics = {
+        state: buildZaloChannelState(),
+        status: null,
+        pairings: null,
+        errors: {}
+      };
+
+      try {
+        const status = gatewayMethod('channels.status', { probe: true }, { timeoutMs });
+        diagnostics.status = isPlainObject(status) && Array.isArray(status.channels)
+          ? { ...status, channels: status.channels.filter(item => item && item.channel === 'zalo') }
+          : status;
+      } catch (e) {
+        diagnostics.errors.status = e.message;
+      }
+
+      try {
+        diagnostics.pairings = openclawCli(['pairing', 'list', 'zalo', '--json'], { timeoutMs, json: true });
+      } catch (e) {
+        diagnostics.errors.pairings = e.stderr ? e.stderr.toString() : e.message;
+      }
+
+      return json(res, 200, {
+        ok: true,
+        channel: 'zalo',
+        diagnostics,
+        guidance: {
+          pluginRequired: true,
+          installCommand: 'openclaw plugins install @openclaw/zalo',
+          dmPolicyDefault: 'pairing',
+          groupsAvailableForMarketplaceBots: false,
+          webhookRequiresHttps: true
+        }
+      });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 

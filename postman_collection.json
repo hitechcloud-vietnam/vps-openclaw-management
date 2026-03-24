@@ -808,7 +808,168 @@
               }
             ],
             "body": {
+          "response": []
+        },
+        {
+          "name": "Install Zalo Plugin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
               "mode": "raw",
+              "raw": "{\n  \"spec\": \"@openclaw/zalo\",\n  \"restart\": true\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/plugin/install",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "plugin", "install"]
+            },
+            "description": "Install the Zalo plugin inside the OpenClaw container and enable the `zalo` plugin entry in local config. Supported specs: `@openclaw/zalo`, `./extensions/zalo`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Zalo Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/config",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "config"]
+            },
+            "description": "Return a Zalo-specific config snapshot, including plugin state, masked token sources, transport mode, pairing defaults, and Marketplace-bot capability notes."
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Zalo Config",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patch\": {\n    \"enabled\": true,\n    \"accounts\": {\n      \"default\": {\n        \"botToken\": \"12345689:abc-xyz\",\n        \"dmPolicy\": \"pairing\",\n        \"webhookUrl\": \"https://example.com/hooks/zalo\",\n        \"webhookSecret\": \"secret-12345\",\n        \"webhookPath\": \"/hooks/zalo\"\n      }\n    },\n    \"mediaMaxMb\": 5\n  },\n  \"restart\": true\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/config",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "config"]
+            },
+            "description": "Merge a local Zalo config patch, validate DM/webhook/media fields, enable the plugin entry, optionally sync `accounts.default.botToken` to `ZALO_BOT_TOKEN`, and restart the gateway by default."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Zalo Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/status?probe=true&timeout=10000",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "status"],
+              "query": [
+                {
+                  "key": "probe",
+                  "value": "true"
+                },
+                {
+                  "key": "timeout",
+                  "value": "10000"
+                }
+              ]
+            },
+            "description": "Fetch a filtered upstream `channels.status` snapshot for only the `zalo` channel. Useful to verify token validity and live connectivity."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Zalo Webhook Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/webhook/config",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "webhook", "config"]
+            },
+            "description": "Show effective Zalo webhook visibility without exposing secrets. Includes mode, root/default-account webhook URL/path, and constraint hints."
+          },
+          "response": []
+        },
+        {
+          "name": "List Zalo Pairings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/pairings?account=default",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "pairings"],
+              "query": [
+                {
+                  "key": "account",
+                  "value": "default"
+                }
+              ]
+            },
+            "description": "List Zalo pairing state through the CLI wrapper `pairing list zalo --json`. DM access defaults to pairing for Marketplace bots."
+          },
+          "response": []
+        },
+        {
+          "name": "Approve Zalo Pairing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"ABC123\",\n  \"account\": \"default\",\n  \"notify\": true\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/pairings/approve",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "pairings", "approve"]
+            },
+            "description": "Approve a pending Zalo pairing code through `pairing approve zalo <CODE>`."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Zalo Diagnostics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/channels/zalo/diagnostics?timeoutMs=20000",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "channels", "zalo", "diagnostics"],
+              "query": [
+                {
+                  "key": "timeoutMs",
+                  "value": "20000"
+                }
+              ]
+            },
+            "description": "Return a consolidated Zalo snapshot with local config state, filtered channel probe output, pairing summary, and operational guidance for Marketplace-bot deployments."
+          },
+          "response": []
               "raw": "{\n  \"account\": \"default\"\n}"
             },
             "url": {
