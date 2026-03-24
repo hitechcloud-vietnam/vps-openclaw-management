@@ -1281,6 +1281,120 @@
               "body": "{\n  \"ok\": true,\n  \"agentId\": \"main\",\n  \"skillKey\": \"custom-vps-audit\",\n  \"updated\": true\n}"
             }
           ]
+        },
+        {
+          "name": "List Custom Skills",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/skills/custom?agentId=main&includeContent=false",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "skills", "custom"],
+              "query": [
+                {
+                  "key": "agentId",
+                  "value": "main"
+                },
+                {
+                  "key": "includeContent",
+                  "value": "false"
+                }
+              ]
+            },
+            "description": "List custom workspace skills for an agent with parsed sections, validation results, and optional raw markdown content."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Custom Skill Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/skills/custom/custom-vps-audit?agentId=main&includeContent=true",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "skills", "custom", "custom-vps-audit"],
+              "query": [
+                {
+                  "key": "agentId",
+                  "value": "main"
+                },
+                {
+                  "key": "includeContent",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Get rich detail for one custom workspace skill, including parsed sections, timestamps, validation issues, and optional raw content."
+          },
+          "response": []
+        },
+        {
+          "name": "Validate Custom Skill Markdown",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"skillKey\": \"custom-vps-audit\",\n  \"content\": \"---\\nname: custom-vps-audit\\ndescription: \\\"Detailed custom skill for VPS audits.\\\"\\n---\\n\\n# Custom VPS Audit\\n\\nUse this skill when the user asks for an OpenClaw VPS audit.\\n\\n## When to Use\\n\\n- Use when the user requests a readiness or troubleshooting audit.\\n\\n## Inputs to Collect\\n\\n- Target environment and hostname\\n\\n## Execution Workflow\\n\\n- Check service status\\n- Review config and channels\\n- Summarize findings\\n\\n## Expected Output\\n\\n- Audit summary\\n\\n## Safety and Guardrails\\n\\n- Ask before destructive changes\\n\\n## Troubleshooting\\n\\n- Compare status, config, and logs when results conflict\\n\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/skills/custom/validate",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "skills", "custom", "validate"]
+            },
+            "description": "Validate custom SKILL.md markdown before saving it. Returns parsed sections and any missing/empty sections."
+          },
+          "response": []
+        },
+        {
+          "name": "Render Custom Skill Markdown",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"OpenClaw Incident Triage\",\n  \"description\": \"Detailed custom skill for incident triage and runtime investigation.\",\n  \"summary\": \"Use this skill when the user asks for a structured incident response workflow.\",\n  \"metadata\": {\n    \"emoji\": \"🚨\",\n    \"requires\": {\n      \"bins\": [\"docker\", \"jq\"],\n      \"config\": [\"gateway.auth.token\"]\n    }\n  },\n  \"activation\": [\n    \"Use when production behavior changes unexpectedly.\",\n    \"Use when support needs a repeatable triage checklist.\"\n  ],\n  \"inputs\": [\n    \"Incident time window\",\n    \"Affected services\",\n    \"Known error symptoms\"\n  ],\n  \"workflow\": [\n    \"Capture current health and recent logs.\",\n    \"Review gateway config, channels, and recent deployments.\",\n    \"Return findings, likely causes, and safe next actions.\"\n  ],\n  \"outputs\": [\n    \"Incident summary\",\n    \"Evidence collected\",\n    \"Recommended next steps\"\n  ],\n  \"safetyNotes\": [\n    \"Do not restart services without approval.\",\n    \"Mask secrets and tokens in all outputs.\"\n  ],\n  \"troubleshooting\": [\n    \"If evidence conflicts, compare status endpoints with container logs.\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/api/skills/custom/render",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "skills", "custom", "render"]
+            },
+            "description": "Render a detailed custom SKILL.md document from structured JSON input without writing it to disk."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Custom Skill",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/api/skills/custom/custom-vps-audit?agentId=main",
+              "host": ["{{BASE_URL}}"],
+              "path": ["api", "skills", "custom", "custom-vps-audit"],
+              "query": [
+                {
+                  "key": "agentId",
+                  "value": "main"
+                }
+              ]
+            },
+            "description": "Delete a custom workspace skill directory for the selected agent."
+          },
+          "response": []
         }
       ]
     },

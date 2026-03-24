@@ -647,6 +647,165 @@ function buildCustomSkillMarkdown(input) {
 }
 
 // --- Auth profiles helpers ---
+
+function toSkillKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+function trimLineBlock(lines) {
+  const copy = Array.isArray(lines) ? [...lines] : [];
+  while (copy.length > 0 && !String(copy[0] || '').trim()) copy.shift();
+  while (copy.length > 0 && !String(copy[copy.length - 1] || '').trim()) copy.pop();
+  return copy.join('\n').trim();
+}
+
+function parseCustomSkillContent(content) {
+  const parsed = parseSkillDocument(content);
+  const lines = String(parsed.body || '').split(/\r?\n/);
+  let cursor = 0;
+  let title = '';
+
+  while (cursor < lines.length) {
+    const line = lines[cursor].trim();
+    if (!line) {
+      cursor += 1;
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      title = line.replace(/^#\s+/, '').trim();
+      cursor += 1;
+    }
+    break;
+  }
+
+  const summaryLines = [];
+  while (cursor < lines.length && !lines[cursor].trim().startsWith('## ')) {
+    summaryLines.push(lines[cursor]);
+    cursor += 1;
+  }
+
+  const sections = {};
+  let currentSection = null;
+  let currentLines = [];
+  const flushSection = () => {
+    if (!currentSection) return;
+    const text = trimLineBlock(currentLines);
+    sections[currentSection] = {
+      text,
+      items: normalizeStringList(text)
+    };
+  };
+
+  for (; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    const trimmed = line.trim();
+    if (trimmed.startsWith('## ')) {
+      flushSection();
+      currentSection = trimmed.replace(/^##\s+/, '').trim();
+      currentLines = [];
+      continue;
+    }
+    currentLines.push(line);
+  }
+  flushSection();
+
+  return {
+    frontmatter: parsed.frontmatter,
+    body: parsed.body,
+    title: title || parsed.frontmatter.name || '',
+    description: parsed.frontmatter.description || '',
+    metadata: getSkillOpenClawMetadata(parsed.frontmatter),
+    summary: trimLineBlock(summaryLines),
+    sections,
+    activation: sections['When to Use']?.items || [],
+    inputs: sections['Inputs to Collect']?.items || [],
+    workflow: sections['Execution Workflow']?.items || [],
+    outputs: sections['Expected Output']?.items || [],
+    commandExamples: sections['Command Examples']?.items || [],
+    configNotes: sections['Configuration Notes']?.items || [],
+    safetyNotes: sections['Safety and Guardrails']?.items || [],
+    troubleshooting: sections['Troubleshooting']?.items || []
+  };
+}
+
+function validateCustomSkillContent(content, expectedSkillKey = '') {
+  const parsed = parseCustomSkillContent(content);
+  const issues = [];
+  const skillKey = expectedSkillKey || parsed.frontmatter.name || toSkillKey(parsed.title);
+
+  if (!isValidSkillKey(skillKey)) {
+    issues.push('Missing or invalid skill key. Use lowercase letters, numbers, hyphens, or underscores.');
+  }
+  if (!parsed.title) issues.push('Missing title heading (`# Title`).');
+  if (!parsed.summary) issues.push('Missing summary paragraph below the title.');
+
+  const sectionChecks = [
+    ['When to Use', parsed.activation],
+    ['Inputs to Collect', parsed.inputs],
+    ['Execution Workflow', parsed.workflow],
+    ['Expected Output', parsed.outputs],
+    ['Safety and Guardrails', parsed.safetyNotes],
+    ['Troubleshooting', parsed.troubleshooting]
+  ];
+  const missingSections = [];
+  for (const [title, items] of sectionChecks) {
+    if (!Array.isArray(items) || items.length === 0) {
+      missingSections.push(title);
+      issues.push(`Section '${title}' is empty or missing.`);
+    }
+  }
+
+  return {
+    ok: issues.length === 0,
+    skillKey,
+    issues,
+    missingSections,
+    parsed
+  };
+}
+
+function buildCustomSkillResponse(skill, options = {}) {
+  const includeContent = options.includeContent !== false;
+  const parsed = parseCustomSkillContent(skill.content || '');
+  let stats = null;
+  try {
+    stats = fs.statSync(skill.path);
+  } catch {}
+
+  return {
+    skillKey: skill.skillKey,
+    agentId: skill.agentId,
+    title: parsed.title || skill.title,
+    description: parsed.description || skill.description,
+    source: skill.source,
+    path: skill.path,
+    directory: skill.directoryName,
+    skillDir: skill.skillDir,
+    metadata: parsed.metadata,
+    frontmatter: parsed.frontmatter,
+    summary: parsed.summary,
+    sections: parsed.sections,
+    activation: parsed.activation,
+    inputs: parsed.inputs,
+    workflow: parsed.workflow,
+    outputs: parsed.outputs,
+    commandExamples: parsed.commandExamples,
+    configNotes: parsed.configNotes,
+    safetyNotes: parsed.safetyNotes,
+    troubleshooting: parsed.troubleshooting,
+    requiredBins: skill.requiredBins,
+    enabled: skill.configEntry?.enabled !== false,
+    configEntry: redactSensitiveData(skill.configEntry),
+    validation: validateCustomSkillContent(skill.content || '', skill.skillKey),
+    createdAt: stats?.birthtime ? stats.birthtime.toISOString() : null,
+    updatedAt: stats?.mtime ? stats.mtime.toISOString() : null,
+    content: includeContent ? skill.content : undefined
+  };
+}
 function getAgentAuthDir(agentId) {
   return `${CONFIG_DIR}/agents/${agentId}/agent`;
 }
@@ -4086,6 +4245,122 @@ const server = http.createServer(async (req, res) => {
 
       fs.writeFileSync(existing.path, nextContent, 'utf8');
       return json(res, 200, { ok: true, agentId, skillKey, updated: true, path: existing.path, content: nextContent });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/skills/custom — List custom workspace skills with rich parsed detail
+  // =========================================================================
+  if (route(req, 'GET', '/api/skills/custom')) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const agentId = (url.searchParams.get('agentId') || 'main').trim();
+      const includeContent = (url.searchParams.get('includeContent') || '').trim().toLowerCase() === 'true';
+      const config = readConfig();
+      const skills = listSkillsInDirectory(getWorkspaceSkillsDir(config, agentId), 'workspace', config, agentId);
+      const customSkills = skills.map(skill => buildCustomSkillResponse(skill, { includeContent }));
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        count: customSkills.length,
+        skills: customSkills,
+        skillKeys: customSkills.map(skill => skill.skillKey)
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/skills/custom/:skillKey — Rich custom skill detail
+  // =========================================================================
+  if ((m = route(req, 'GET', '/api/skills/custom/:skillKey'))) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const agentId = (url.searchParams.get('agentId') || 'main').trim();
+      const includeContent = (url.searchParams.get('includeContent') || 'true').trim().toLowerCase() !== 'false';
+      const config = readConfig();
+      const existing = findWorkspaceSkill(config, agentId, m.params.skillKey);
+      if (!existing) {
+        return json(res, 404, { ok: false, error: `Workspace skill '${m.params.skillKey}' not found` });
+      }
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        skill: buildCustomSkillResponse(existing, { includeContent })
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/skills/custom/validate — Validate arbitrary custom skill markdown
+  // =========================================================================
+  if (route(req, 'POST', '/api/skills/custom/validate')) {
+    try {
+      const body = await parseBody(req);
+      const content = typeof body.content === 'string' ? body.content : '';
+      if (!content.trim()) {
+        return json(res, 400, { ok: false, error: 'content is required' });
+      }
+      const expectedSkillKey = (body.skillKey || '').trim();
+      const validation = validateCustomSkillContent(content, expectedSkillKey);
+      return json(res, validation.ok ? 200 : 422, {
+        ok: validation.ok,
+        skillKey: validation.skillKey,
+        issues: validation.issues,
+        missingSections: validation.missingSections,
+        parsed: {
+          title: validation.parsed.title,
+          description: validation.parsed.description,
+          summary: validation.parsed.summary,
+          metadata: validation.parsed.metadata,
+          sections: validation.parsed.sections
+        }
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/skills/custom/render — Render detailed custom skill markdown from JSON
+  // =========================================================================
+  if (route(req, 'POST', '/api/skills/custom/render')) {
+    try {
+      const body = await parseBody(req);
+      const skillKey = toSkillKey(body.skillKey || body.name || body.title || '');
+      if (!isValidSkillKey(skillKey)) {
+        return json(res, 400, { ok: false, error: 'Invalid skillKey. Provide skillKey, name, or title.' });
+      }
+      const content = buildCustomSkillMarkdown({ ...body, skillKey });
+      const validation = validateCustomSkillContent(content, skillKey);
+      return json(res, 200, {
+        ok: true,
+        skillKey,
+        content,
+        validation
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // DELETE /api/skills/custom/:skillKey — Remove a custom workspace skill
+  // =========================================================================
+  if ((m = route(req, 'DELETE', '/api/skills/custom/:skillKey'))) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const agentId = (url.searchParams.get('agentId') || 'main').trim();
+      const config = readConfig();
+      const existing = findWorkspaceSkill(config, agentId, m.params.skillKey);
+      if (!existing) {
+        return json(res, 404, { ok: false, error: `Workspace skill '${m.params.skillKey}' not found` });
+      }
+
+      fs.rmSync(existing.skillDir, { recursive: true, force: true });
+
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        skillKey: existing.skillKey,
+        deleted: true,
+        path: existing.skillDir
+      });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
