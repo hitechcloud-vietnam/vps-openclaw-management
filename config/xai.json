@@ -1,0 +1,51 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "xai/grok-3-latest"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "xai": {
+        "baseUrl": "https://api.x.ai/v1",
+        "apiKey": "${XAI_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          { "id": "grok-4", "name": "Grok 4" },
+          { "id": "grok-4-fast-non-reasoning", "name": "Grok 4 Fast" },
+          { "id": "grok-4-fast-reasoning", "name": "Grok 4 Fast Reasoning" },
+          { "id": "grok-4-1-fast-non-reasoning", "name": "Grok 4.1 Fast" },
+          { "id": "grok-4-1-fast-reasoning", "name": "Grok 4.1 Fast Reasoning" },
+          { "id": "grok-3-beta", "name": "Grok 3 Beta" },
+          { "id": "grok-3-mini-beta", "name": "Grok 3 Mini Beta" }
+        ]
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "trustedProxies": ["172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "controlUi": {
+      "enabled": true,
+      "allowInsecureAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "dangerouslyDisableDeviceAuth": true
+    }
+  },
+  "browser": {
+    "headless": true,
+    "defaultProfile": "openclaw",
+    "noSandbox": true
+  }
+}

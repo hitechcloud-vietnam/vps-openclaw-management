@@ -1,0 +1,15 @@
+{
+  "name": "traffic-fine-lookup-vn",
+  "version": "1.0.0",
+  "description": "Traffic fine lookup for vehicles in Vietnam (VNeTraffic)",
+  "type": "module",
+  "bin": {
+    "check-vnetraffic": "./scripts/check_vnetraffic.mjs"
+  },
+  "scripts": {
+    "check-vnetraffic": "node ./scripts/check_vnetraffic.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

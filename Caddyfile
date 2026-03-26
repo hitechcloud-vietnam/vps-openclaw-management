@@ -1,0 +1,13 @@
+{$DOMAIN:localhost} {
+    {$CADDY_TLS:tls internal}
+
+    handle /login {
+        reverse_proxy 127.0.0.1:9998
+    }
+
+    handle /api/auth/* {
+        reverse_proxy 127.0.0.1:9998
+    }
+
+    reverse_proxy openclaw:18789
+}
