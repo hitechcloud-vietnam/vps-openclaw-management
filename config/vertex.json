@@ -1,0 +1,56 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "vertex/gemini-2.5-pro"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "vertex": {
+        "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects",
+        "apiKey": "${VERTEX_API_KEY}",
+        "api": "gemini",
+        "models": [
+          { "id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview (Vertex)" },
+          { "id": "gemini-3.1-flash-lite-preview", "name": "Gemini 3.1 Flash Lite Preview (Vertex)" },
+          { "id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview (Vertex)" },
+          { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro (Vertex)" },
+          { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash (Vertex)" },
+          { "id": "gemini-2.0-flash-thinking-exp", "name": "Gemini 2.0 Flash Thinking Exp (Vertex)" },
+          { "id": "gemma-2-27b-it", "name": "Gemma 2 27B (Vertex)" },
+          { "id": "deepseek-v3.2", "name": "DeepSeek V3.2 (Vertex Partner)" },
+          { "id": "qwen3-next-80b", "name": "Qwen3 Next 80B (Vertex Partner)" },
+          { "id": "glm-5", "name": "GLM 5 (Vertex Partner)" },
+          { "id": "claude-opus-4-5@20251101", "name": "Claude Opus 4.5 (Vertex)" },
+          { "id": "claude-sonnet-4-5@20251101", "name": "Claude Sonnet 4.5 (Vertex)" }
+        ]
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "controlUi": {
+      "enabled": true,
+      "allowInsecureAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "dangerouslyDisableDeviceAuth": false
+    }
+  },
+  "browser": {
+    "headless": true,
+    "defaultProfile": "openclaw",
+    "noSandbox": true
+  }
+}

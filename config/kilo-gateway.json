@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "kilo-gateway/kilo-auto/frontier"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,17 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "kilo-gateway": {
+        "baseUrl": "https://api.kilo.ai/api/gateway",
+        "apiKey": "${KILO_GATEWAY_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "kilo-auto/frontier", "name": "Kilo Auto Frontier" },
+          { "id": "kilo-auto/balanced", "name": "Kilo Auto Balanced" },
+          { "id": "kilo-auto/free", "name": "Kilo Auto Free" },
+          { "id": "nvidia/nemotron-3-super-120b-a12b:free", "name": "Nemotron 3 Super 120B (Free)" },
+          { "id": "minimax/minimax-m2.5:free", "name": "MiniMax M2.5 (Free)" },
+          { "id": "arcee-ai/trinity-large-preview:free", "name": "Trinity Large Preview (Free)" }
         ]
       }
     }

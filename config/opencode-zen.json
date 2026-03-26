@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "opencode-zen/minimax-m2.5-free"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,16 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "opencode-zen": {
+        "baseUrl": "https://opencode.ai/zen/v1",
+        "apiKey": "${OPENCODE_ZEN_API_KEY}",
         "api": "openai-completions",
+        "authHeader": "Authorization",
+        "authPrefix": "Bearer",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "minimax-m2.5-free", "name": "MiniMax M2.5 Free" },
+          { "id": "big-pickle", "name": "Big Pickle" },
+          { "id": "gpt-5-nano", "name": "GPT 5 Nano" }
         ]
       }
     }

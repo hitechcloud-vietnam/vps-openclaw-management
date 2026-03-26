@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "perplexity/sonar-pro"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,13 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "perplexity": {
+        "baseUrl": "https://api.perplexity.ai",
+        "apiKey": "${PERPLEXITY_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "sonar-pro", "name": "Sonar Pro" },
+          { "id": "sonar", "name": "Sonar" }
         ]
       }
     }

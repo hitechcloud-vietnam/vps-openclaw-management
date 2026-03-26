@@ -222,7 +222,7 @@ fi
 
 cat > ${INSTALL_DIR}/.env << EOF
 # OpenClaw Environment Configuration
-# Sau khi thay doi, restart: docker compose restart openclaw
+# Sau khi thay doi, restart: systemctl restart openclaw
 
 # Version
 OPENCLAW_VERSION=${APP_VERSION}
@@ -232,8 +232,6 @@ OPENCLAW_GATEWAY_PORT=18789
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 
 # Domain & TLS (Caddy)
-# DOMAIN: ten mien hoac http://IP
-# CADDY_TLS: empty = auto Let's Encrypt, "tls internal" = self-signed
 DOMAIN=${CADDY_DOMAIN}
 CADDY_TLS=${CADDY_TLS_VALUE}
 
@@ -244,26 +242,54 @@ OPENCLAW_MGMT_API_KEY=${MGMT_API_KEY}
 NODE_OPTIONS=--max-old-space-size=$(( $(free -m | awk '/^Mem:/{print $2}') * 80 / 100 ))
 
 # AI Provider API Keys (uncomment va dien)
+# AIMLAPI_API_KEY=your_key_here
+# ALIBABA_API_KEY=your_key_here
+# ALICODE_API_KEY=your_key_here
+# ALICODE_INTL_API_KEY=your_key_here
 # ANTHROPIC_API_KEY=your_key_here
+# BAICHUAN_API_KEY=your_key_here
+# BAILIAN_CODING_PLAN_API_KEY=your_key_here
+# BLACKBOX_API_KEY=your_key_here
+# CEREBRAS_API_KEY=your_key_here
+# CLOUDFLARE_AI_API_KEY=your_key_here
+# COHERE_API_KEY=your_key_here
+# DEEPSEEK_API_KEY=your_key_here
+# FIREWORKS_API_KEY=your_key_here
+# GLM_API_KEY=your_key_here
 # OPENAI_API_KEY=your_key_here
 # GEMINI_API_KEY=your_key_here
 # DEEPSEEK_API_KEY=your_key_here
 # GROQ_API_KEY=your_key_here
-# TOGETHER_API_KEY=your_key_here
-# MISTRAL_API_KEY=your_key_here
-# XAI_API_KEY=your_key_here
-# CEREBRAS_API_KEY=your_key_here
-# SAMBANOVA_API_KEY=your_key_here
-# FIREWORKS_API_KEY=your_key_here
-# COHERE_API_KEY=your_key_here
-# YI_API_KEY=your_key_here
-# BAICHUAN_API_KEY=your_key_here
-# STEPFUN_API_KEY=your_key_here
-# SILICONFLOW_API_KEY=your_key_here
-# NOVITA_API_KEY=your_key_here
-# OPENROUTER_API_KEY=your_key_here
+# HUGGINGFACE_API_KEY=your_key_here
+# HYPERBOLIC_API_KEY=your_key_here
+# KILO_GATEWAY_API_KEY=your_key_here
+# KIMI_API_KEY=your_key_here
+# KIMI_CODING_API_KEY=your_key_here
+# LONGCAT_API_KEY=your_key_here
 # MINIMAX_API_KEY=your_key_here
+# MINIMAX_CN_API_KEY=your_key_here
+# MISTRAL_API_KEY=your_key_here
 # MOONSHOT_API_KEY=your_key_here
+# NEBIUS_API_KEY=your_key_here
+# NOVITA_API_KEY=your_key_here
+# NVIDIA_API_KEY=your_key_here
+# OLLAMA_CLOUD_API_KEY=your_key_here
+# OPENCODE_GO_API_KEY=your_key_here
+# OPENCODE_ZEN_API_KEY=your_key_here
+# OPENROUTER_API_KEY=your_key_here
+# PERPLEXITY_API_KEY=your_key_here
+# POLLINATIONS_API_KEY=your_key_here
+# PUTER_API_KEY=your_key_here
+# SAMBANOVA_API_KEY=your_key_here
+# SCALEWAY_API_KEY=your_key_here
+# SILICONFLOW_API_KEY=your_key_here
+# STEPFUN_API_KEY=your_key_here
+# SYNTHETIC_API_KEY=your_key_here
+# TOGETHER_API_KEY=your_key_here
+# VERTEX_API_KEY=your_key_here
+# XAI_API_KEY=your_key_here
+# YI_API_KEY=your_key_here
+# ZAI_API_KEY=your_key_here
 # ZHIPU_API_KEY=your_key_here
 
 # Messaging Channels (uncomment va dien)

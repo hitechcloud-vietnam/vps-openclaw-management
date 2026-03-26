@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "puter/gpt-4o-mini"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,21 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "puter": {
+        "baseUrl": "https://api.puter.com/puterai/openai/v1",
+        "apiKey": "${PUTER_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "gpt-4o-mini", "name": "GPT-4o Mini" },
+          { "id": "gpt-4o", "name": "GPT-4o" },
+          { "id": "gpt-4.1", "name": "GPT-4.1" },
+          { "id": "gpt-5-mini", "name": "GPT-5 Mini" },
+          { "id": "claude-sonnet-4", "name": "Claude Sonnet 4" },
+          { "id": "google/gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
+          { "id": "deepseek/deepseek-chat", "name": "DeepSeek Chat" },
+          { "id": "x-ai/grok-4", "name": "Grok 4" },
+          { "id": "llama-4-scout", "name": "Llama 4 Scout" },
+          { "id": "qwen/qwen3-235b-a22b", "name": "Qwen3 235B" }
         ]
       }
     }

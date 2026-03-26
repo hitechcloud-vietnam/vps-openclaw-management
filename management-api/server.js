@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 // =============================================================================
-// OpenClaw Management API — Docker Compose based service management
+// OpenClaw Management API — None Docker Compose based service management
 // Auth: Bearer OPENCLAW_MGMT_API_KEY | Port: 9998 | Systemd: openclaw-mgmt.service
 // =============================================================================
 
 const http = require('http');
-const { execSync, exec, execFileSync } = require('child_process');
+const { execSync, exec, execFileSync, spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+
 const PORT = 9998;
-const MGMT_VERSION = '1.0.6';
+const MGMT_VERSION = '1.0.29';
 const GITHUB_REPO = 'Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management';
 const COMPOSE_DIR = '/opt/openclaw';
 const COMPOSE_CMD = `docker compose -f ${COMPOSE_DIR}/docker-compose.yml`;
@@ -37,6 +38,10 @@ const AGENT_WORKSPACE_FILES = [
 // --- GitHub version check (cached) ---
 let _latestVersionCache = { version: null, checkedAt: 0 };
 const VERSION_CHECK_INTERVAL = 60 * 1000; // 1 minute
+// --- ChatGPT OAuth (OpenAI Codex) PKCE sessions ---
+const _oauthSessions = {}; // sessionId → { codeVerifier, clientId, agentId, createdAt }
+const OAUTH_SESSION_TTL = 10 * 60 * 1000; // 10 minutes
+let _oauthClientCache = null;
 
 function getLatestVersion() {
   const now = Date.now();
@@ -876,6 +881,54 @@ function getAuthProfileApiKey(providerName, agentId = 'main') {
   return getAgentApiKey(agentId, providerName);
 }
 
+// --- Terminal command whitelist ---
+function parseTerminalCmd(cmdStr) {
+  // Block shell injection metacharacters
+  if (/[;&|`$(){}\\!'"<>]/.test(cmdStr)) {
+    return { valid: false, error: 'Shell metacharacters not allowed' };
+  }
+  const parts = cmdStr.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { valid: false, error: 'Empty command' };
+  const base = parts[0].toLowerCase();
+
+  // docker compose <subcommand> [args...]
+  if (base === 'docker' && parts[1] === 'compose') {
+    const sub = parts[2];
+    const allowed = ['ps', 'logs', 'restart', 'pull', 'up', 'down', 'exec', 'stats', 'images', 'top', 'config', 'ls'];
+    if (!sub || !allowed.includes(sub)) {
+      return { valid: false, error: 'Allowed docker compose subcommands: ' + allowed.join(', ') };
+    }
+    const rest = parts.slice(2);
+    // Auto-inject -T for exec (no TTY for non-interactive streaming)
+    if (sub === 'exec' && !rest.includes('-T') && !rest.includes('-t')) {
+      rest.splice(1, 0, '-T');
+    }
+    return { valid: true, argv: ['docker', 'compose', '-f', COMPOSE_DIR + '/docker-compose.yml', ...rest] };
+  }
+
+  // openclaw / claw → docker compose exec -T openclaw node dist/index.js <args>
+  if (base === 'openclaw' || base === 'claw') {
+    return {
+      valid: true,
+      argv: ['docker', 'compose', '-f', COMPOSE_DIR + '/docker-compose.yml', 'exec', '-T', 'openclaw', 'node', 'dist/index.js', ...parts.slice(1)]
+    };
+  }
+
+  // Safe system commands
+  const sysMap = {
+    'df':       () => ['df', ...(parts.slice(1).length ? parts.slice(1) : ['-h'])],
+    'free':     () => ['free', ...(parts.slice(1).length ? parts.slice(1) : ['-h'])],
+    'uptime':   () => ['uptime'],
+    'date':     () => ['date'],
+    'uname':    () => ['uname', '-a'],
+    'hostname': () => ['hostname', '-I'],
+    'ps':       () => ['ps', 'aux'],
+  };
+  if (sysMap[base]) return { valid: true, argv: sysMap[base]() };
+
+  return { valid: false, error: 'Command not allowed. Use: docker compose ..., openclaw ..., df, free, uptime, ps, date' };
+}
+
 // --- Route matching ---
 function route(req, method, path) {
   if (req.method !== method) return null;
@@ -954,7 +1007,7 @@ const PROVIDERS = {
     }
   },
   openai: {
-    name: 'OpenAI',
+    name: 'OpenAI (API Key)',
     envKey: 'OPENAI_API_KEY',
     authProfileProvider: 'openai',
     configTemplate: `${TEMPLATES_DIR}/openai.json`,
@@ -971,6 +1024,25 @@ const PROVIDERS = {
       { id: 'o4-mini', name: 'o4-mini' }
     ],
     testFn: (apiKey) => testBearerModels('https://api.openai.com/v1/models', apiKey)
+  },
+  'openai-codex': {
+    name: 'ChatGPT OAuth (Codex)',
+    envKey: null,              // No API key — uses OAuth token from auth-profiles.json
+    authProfileProvider: 'openai-codex',
+    configTemplate: `${TEMPLATES_DIR}/openai-codex.json`,
+    oauthOnly: true,           // Requires ChatGPT OAuth, no API key support
+    knownModels: [
+      { id: 'openai-codex/gpt-5.4',            name: 'GPT-5.4',          default: true },
+      { id: 'openai-codex/gpt-5.4-mini',        name: 'GPT-5.4-Mini' },
+      { id: 'openai-codex/gpt-5.3-codex',       name: 'GPT-5.3-Codex' },
+      { id: 'openai-codex/gpt-5.3-codex-spark', name: 'GPT-5.3-Codex-Spark' },
+      { id: 'openai-codex/gpt-5.2-codex',       name: 'GPT-5.2-Codex' },
+      { id: 'openai-codex/gpt-5.2',             name: 'GPT-5.2' },
+      { id: 'openai-codex/gpt-5.1-codex-max',   name: 'GPT-5.1-Codex-Max' },
+      { id: 'openai-codex/gpt-5.1-codex-mini',  name: 'GPT-5.1-Codex-Mini' },
+      { id: 'openai-codex/gpt-5.1',             name: 'GPT-5.1' }
+    ],
+    testFn: () => false  // OAuth token — cannot test with static key
   },
   google: {
     name: 'Google Gemini',
@@ -1135,6 +1207,21 @@ const CHANNEL_MAP = {
   slack:    { envKey: 'SLACK_BOT_TOKEN',     configKey: 'slack',    tokenField: 'botToken' },
   zalo:     { envKey: 'ZALO_BOT_TOKEN',      configKey: 'zalo',     tokenField: 'botToken' }
 };
+
+// =============================================================================
+// ChatGPT OAuth (OpenAI Codex) — PKCE OAuth 2.0 Helpers
+// Constants extracted from @mariozechner/pi-ai/dist/utils/oauth/openai-codex.js
+// =============================================================================
+const OPENAI_OAUTH_CLIENT_ID  = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const OPENAI_OAUTH_TOKEN_URL  = 'https://auth.openai.com/oauth/token';
+const OPENAI_OAUTH_AUTH_URL   = 'https://auth.openai.com/oauth/authorize';
+const OPENAI_OAUTH_REDIRECT   = 'http://localhost:1455/auth/callback';
+const OPENAI_OAUTH_SCOPE      = 'openid profile email offline_access';
+const OPENAI_OAUTH_PROFILE    = 'openai-codex'; // provider key used by openclaw
+
+function pkceVerifier() {
+  return crypto.randomBytes(32).toString('base64url');
+}
 
 // --- Docker compose helpers ---
 function dockerCompose(cmd, timeout = 60000) {
@@ -1314,6 +1401,156 @@ function buildZaloChannelState() {
     }
   };
 }
+function pkceChallenge(verifier) {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
+}
+
+// Decode JWT payload to extract accountId / email (no signature verification needed)
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch { return null; }
+}
+
+// Exchange authorization code for tokens using curl
+function exchangeOAuthCode(code, codeVerifier) {
+  const tmpFile = `/tmp/openclaw-oauth-${crypto.randomBytes(8).toString('hex')}.dat`;
+  try {
+    const params = [
+      `grant_type=authorization_code`,
+      `client_id=${encodeURIComponent(OPENAI_OAUTH_CLIENT_ID)}`,
+      `code=${encodeURIComponent(code)}`,
+      `code_verifier=${encodeURIComponent(codeVerifier)}`,
+      `redirect_uri=${encodeURIComponent(OPENAI_OAUTH_REDIRECT)}`
+    ].join('&');
+    fs.writeFileSync(tmpFile, params, 'utf8');
+    const result = shell(
+      `curl -sf --max-time 30 -X POST '${OPENAI_OAUTH_TOKEN_URL}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-binary @${tmpFile}`,
+      35000
+    );
+    return JSON.parse(result);
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
+
+// Store OAuth tokens in auth-profiles.json using openclaw's exact credential format
+// Fields: { type, provider, access, refresh, expires (ms), accountId }
+// Profile key: "openai-codex:<email|default>"
+function storeOAuthTokens(tokens, agentId = 'main') {
+  const data = readAgentAuth(agentId);
+  data.profiles = data.profiles || {};
+
+  // Extract accountId and email from JWT
+  const JWT_CLAIM = 'https://api.openai.com/auth';
+  const payload = decodeJwtPayload(tokens.access);
+  const accountId = payload?.[JWT_CLAIM]?.chatgpt_account_id || null;
+  const email = (typeof payload?.email === 'string' && payload.email.trim()) ? payload.email.trim() : null;
+
+  const profileKey = `${OPENAI_OAUTH_PROFILE}:${email || 'default'}`;
+
+  // Remove any old profile keys for this provider
+  for (const k of Object.keys(data.profiles)) {
+    if (k.startsWith(`${OPENAI_OAUTH_PROFILE}:`)) delete data.profiles[k];
+  }
+  // Also remove old incorrect key from previous management API versions
+  delete data.profiles['openai:oauth'];
+
+  data.profiles[profileKey] = {
+    type: 'oauth',
+    provider: OPENAI_OAUTH_PROFILE,
+    access: tokens.access,
+    refresh: tokens.refresh,
+    expires: tokens.expires,  // milliseconds (Date.now() + expires_in*1000)
+    accountId
+  };
+  writeAgentAuth(agentId, data);
+  return { profileKey, accountId, email };
+}
+
+// Refresh token — returns same shape as exchangeOAuthCode for storeOAuthTokens
+function refreshOAuthToken(refreshToken) {
+  const tmpFile = `/tmp/openclaw-oauth-refresh-${crypto.randomBytes(8).toString('hex')}.dat`;
+  try {
+    const params = [
+      `grant_type=refresh_token`,
+      `client_id=${encodeURIComponent(OPENAI_OAUTH_CLIENT_ID)}`,
+      `refresh_token=${encodeURIComponent(refreshToken)}`
+    ].join('&');
+    fs.writeFileSync(tmpFile, params, 'utf8');
+    const result = shell(
+      `curl -sf --max-time 30 -X POST '${OPENAI_OAUTH_TOKEN_URL}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-binary @${tmpFile}`,
+      35000
+    );
+    const raw = JSON.parse(result);
+    // Normalize to openclaw's field format
+    if (!raw.access_token) return null;
+    return {
+      access: raw.access_token,
+      refresh: raw.refresh_token,
+      expires: typeof raw.expires_in === 'number' ? Date.now() + raw.expires_in * 1000 : null
+    };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
+
+// Get stored OAuth profile for an agent (searches for openai-codex:* key)
+function getOAuthProfile(agentId = 'main') {
+  const data = readAgentAuth(agentId);
+  const profiles = data.profiles || {};
+  for (const [k, v] of Object.entries(profiles)) {
+    if (k.startsWith(`${OPENAI_OAUTH_PROFILE}:`) && v && v.access) return { key: k, ...v };
+  }
+  return null;
+}
+
+// Attempt to refresh tokens for a single agent. Returns 'refreshed' | 'skipped' | 'error'
+function tryRefreshAgent(agentId) {
+  try {
+    const profile = getOAuthProfile(agentId);
+    if (!profile || !profile.refresh) return 'skipped';
+
+    const now = Date.now();
+    // expires is in milliseconds; refresh if < 10 min remaining or expired
+    const needsRefresh = !profile.expires || (profile.expires - now) < 600000;
+    if (!needsRefresh) return 'skipped';
+
+    const tokens = refreshOAuthToken(profile.refresh);
+    if (!tokens || !tokens.access) return 'error';
+
+    storeOAuthTokens(tokens, agentId);
+    const remaining = tokens.expires ? Math.round((tokens.expires - Date.now()) / 1000) : '?';
+    console.log(`[OAuth] Refreshed token for agent "${agentId}" (expires in ${remaining}s)`);
+    return 'refreshed';
+  } catch (e) {
+    console.error(`[OAuth] Auto-refresh failed for agent "${agentId}": ${e.message}`);
+    return 'error';
+  }
+}
+
+// Cleanup expired OAuth sessions
+function pruneOAuthSessions() {
+  const now = Date.now();
+  for (const id of Object.keys(_oauthSessions)) {
+    if (now - _oauthSessions[id].createdAt > OAUTH_SESSION_TTL) delete _oauthSessions[id];
+  }
+}
+
+// --- Docker compose helpers ---
+function dockerCompose(cmd, timeout = 60000) {
+  return shell(`${COMPOSE_CMD} ${cmd}`, timeout);
+}
+
+function dockerExec(cmd, timeout = 30000) {
+  return shell(`${COMPOSE_CMD} exec -T openclaw ${cmd}`, timeout);
+}
 
 function getContainerStatus() {
   try {
@@ -1327,6 +1564,42 @@ function getContainerStatus() {
 
 function restartContainer(service = 'openclaw') {
   dockerCompose(`up -d ${service}`, 60000);
+  dockerCompose(`restart ${service}`, 60000);
+}
+
+// =============================================================================
+// On-demand device auto-approve polling (activated by /pair endpoint)
+// =============================================================================
+let _devicePollUntil = 0;
+let _devicePollTimer = null;
+
+function startDevicePoll() {
+  if (_devicePollTimer) return;
+  console.log('[Devices] Polling activated');
+  _devicePollTimer = setInterval(() => {
+    if (Date.now() > _devicePollUntil) {
+      clearInterval(_devicePollTimer);
+      _devicePollTimer = null;
+      console.log('[Devices] Polling stopped (timeout)');
+      return;
+    }
+    try {
+      const output = execSync(
+        'docker exec openclaw node dist/index.js devices list --json 2>&1',
+        { encoding: 'utf8', timeout: 15000 }
+      );
+      const jsonMatch = output.trim().match(/\{[\s\S]*\}$/);
+      if (!jsonMatch) return;
+      const data = JSON.parse(jsonMatch[0]);
+      const pending = (data.pending || []).filter(d => d.requestId);
+      for (const d of pending) {
+        try {
+          execSync(`docker exec openclaw node dist/index.js devices approve ${d.requestId} 2>&1`, { timeout: 15000 });
+          console.log(`[Devices] Auto-approved: ${d.deviceId} (${d.requestId})`);
+        } catch (e) { console.error(`[Devices] approve failed ${d.requestId}:`, e.message?.slice(0, 200)); }
+      }
+    } catch {}
+  }, 5 * 1000);
 }
 
 // =============================================================================
@@ -1355,10 +1628,106 @@ const server = http.createServer(async (req, res) => {
   // PUBLIC ROUTES (no Bearer auth required)
   // =========================================================================
 
+  // GET /pair — Activate device auto-approve + redirect to gateway dashboard
+  if (route(req, 'GET', '/pair')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const token = url.searchParams.get('token') || '';
+    if (!token) return json(res, 400, { ok: false, error: 'Missing token parameter' });
+    _devicePollUntil = Date.now() + 60 * 1000;
+    if (!_devicePollTimer) startDevicePoll();
+    const rawDomain = (getEnvValue('DOMAIN') || '').trim();
+    const domain = (rawDomain && rawDomain !== 'localhost' && !/\s/.test(rawDomain)) ? rawDomain.replace(/^https?:\/\//, '') : null;
+    const host = domain || getServerIP();
+    const proto = domain ? 'https' : 'http';
+    res.writeHead(302, { Location: `${proto}://${host}/#token=${encodeURIComponent(token)}` });
+    return res.end();
+  }
+
   // GET /login — Serve login page
   if (route(req, 'GET', '/login')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(LOGIN_HTML);
+  }
+
+  // GET /terminal — Serve terminal GUI page (public, auth handled client-side)
+  if (route(req, 'GET', '/terminal')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(TERMINAL_HTML);
+  }
+
+  // GET /api/terminal/stream — SSE streaming terminal (auth via ?token= query param)
+  if (route(req, 'GET', '/api/terminal/stream')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const qToken = (url.searchParams.get('token') || '').trim();
+    const expected = getMgmtApiKey();
+    let authed = false;
+    if (qToken && expected && qToken.length === expected.length) {
+      try { authed = crypto.timingSafeEqual(Buffer.from(qToken), Buffer.from(expected)); } catch {}
+    }
+    if (!authed) {
+      recordFailedAuth(ip);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write('data: ' + JSON.stringify({ type: 'error', text: 'Unauthorized' }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'exit', code: 1 }) + '\n\n');
+      return res.end();
+    }
+
+    const cmdStr = (url.searchParams.get('cmd') || '').trim();
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    if (!cmdStr) {
+      res.write('data: ' + JSON.stringify({ type: 'error', text: 'Missing cmd parameter' }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'exit', code: 1 }) + '\n\n');
+      return res.end();
+    }
+
+    const parsed = parseTerminalCmd(cmdStr);
+    if (!parsed.valid) {
+      res.write('data: ' + JSON.stringify({ type: 'error', text: parsed.error }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'exit', code: 1 }) + '\n\n');
+      return res.end();
+    }
+
+    const proc = spawn(parsed.argv[0], parsed.argv.slice(1), {
+      cwd: COMPOSE_DIR,
+      env: { ...process.env, TERM: 'xterm-256color', FORCE_COLOR: '1' },
+    });
+
+    let closed = false;
+    req.on('close', () => {
+      closed = true;
+      try { proc.kill('SIGTERM'); } catch {}
+    });
+
+    proc.stdout.on('data', chunk => {
+      if (!closed) res.write('data: ' + JSON.stringify({ type: 'stdout', text: chunk.toString() }) + '\n\n');
+    });
+
+    proc.stderr.on('data', chunk => {
+      if (!closed) res.write('data: ' + JSON.stringify({ type: 'stderr', text: chunk.toString() }) + '\n\n');
+    });
+
+    proc.on('error', err => {
+      if (!closed) {
+        res.write('data: ' + JSON.stringify({ type: 'error', text: err.message }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ type: 'exit', code: 1 }) + '\n\n');
+        res.end();
+      }
+    });
+
+    proc.on('exit', (code) => {
+      if (!closed) {
+        res.write('data: ' + JSON.stringify({ type: 'exit', code: code !== null ? code : 0 }) + '\n\n');
+        res.end();
+      }
+    });
+
+    return;
   }
 
   // POST /api/auth/login — Validate credentials, return gateway token
@@ -1522,7 +1891,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         domain: domain,
         ip: serverIP,
-        dashboardUrl: `${scheme}://${host}/#token=${token}`,
+        dashboardUrl: `http://${serverIP}:${PORT}/pair?token=${token}`,
         gatewayToken: token,
         mgmtApiKey: sanitizeKey(getMgmtApiKey()),
         status,
@@ -1616,7 +1985,7 @@ const server = http.createServer(async (req, res) => {
 
       // Download latest Caddyfile template from repo
       try {
-        shell(`curl -fsSL 'https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/main/Caddyfile?t=${Date.now()}' -o '${CADDYFILE}'`, 15000);
+        shell(`curl -fsSL 'https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/v2/Caddyfile?t=${Date.now()}' -o '${CADDYFILE}'`, 15000);
       } catch (dlErr) {
         return json(res, 500, { ok: false, error: 'Failed to download Caddyfile: ' + dlErr.message });
       }
@@ -2483,7 +2852,7 @@ const server = http.createServer(async (req, res) => {
 
       // Built-in providers
       for (const [id, p] of Object.entries(PROVIDERS)) {
-        const envVal = getEnvValue(p.envKey);
+        const envVal = p.envKey ? getEnvValue(p.envKey) : null;
         const profileVal = getAuthProfileApiKey(p.authProfileProvider);
         const val = envVal || profileVal;
 
@@ -2563,10 +2932,16 @@ const server = http.createServer(async (req, res) => {
 
       const apiKeys = {};
       for (const [id, p] of Object.entries(PROVIDERS)) {
-        const envVal = getEnvValue(p.envKey);
-        const profileVal = getAuthProfileApiKey(p.authProfileProvider);
-        const val = envVal || profileVal;
-        apiKeys[id] = val ? sanitizeKey(val) : null;
+        if (p.oauthOnly) {
+          // OAuth-only provider — show OAuth status instead of API key
+          const oauthProfile = getOAuthProfile('main');
+          apiKeys[id] = oauthProfile ? 'oauth:active' : null;
+        } else {
+          const envVal = p.envKey ? getEnvValue(p.envKey) : null;
+          const profileVal = getAuthProfileApiKey(p.authProfileProvider);
+          const val = envVal || profileVal;
+          apiKeys[id] = val ? sanitizeKey(val) : null;
+        }
       }
 
       // Include custom providers (from template files)
@@ -2847,10 +3222,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Write auth-profiles.json if there's an API key in env for this provider
-      const authProvider = providerConfig.authProfileProvider;
-      const existingKey = getEnvValue(providerConfig.envKey);
-      if (existingKey) {
-        setAuthProfileApiKey(authProvider, existingKey);
+      // Skip for oauth-only providers (e.g. openai-codex uses OAuth token, not API key)
+      if (!providerConfig.oauthOnly) {
+        const authProvider = providerConfig.authProfileProvider;
+        const existingKey = getEnvValue(providerConfig.envKey);
+        if (existingKey) {
+          setAuthProfileApiKey(authProvider, existingKey);
+        }
       }
 
       writeConfig(config);
@@ -2990,7 +3368,7 @@ const server = http.createServer(async (req, res) => {
           p.models.push({ id: modelId, name: modelName || modelId });
         }
       }
-      tpl.gateway = { mode: 'local', bind: 'lan', auth: { token: '${OPENCLAW_GATEWAY_TOKEN}' }, trustedProxies: ['172.16.0.0/12', '10.0.0.0/8', '192.168.0.0/16'], controlUi: { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: true } };
+      tpl.gateway = { mode: 'local', bind: 'lan', auth: { token: '${OPENCLAW_GATEWAY_TOKEN}' }, trustedProxies: ['127.0.0.1', '::1', '172.16.0.0/12', '10.0.0.0/8', '192.168.0.0/16'], controlUi: { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: false } };
       tpl.browser = { headless: true, defaultProfile: 'openclaw', noSandbox: true };
 
       fs.writeFileSync(tplPath, JSON.stringify(tpl, null, 2), 'utf8');
@@ -4529,6 +4907,39 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
+  // GET /api/devices — List tat ca devices cho agent
+  // =========================================================================
+  if (route(req, 'GET', '/api/devices')) {
+    try {
+      const output = dockerExec('node dist/index.js devices list', 15000);
+      return json(res, 200, { ok: true, output });
+    } catch (e) {
+      const stderr = e.stderr ? e.stderr.toString() : '';
+      const stdout = e.stdout ? e.stdout.toString() : '';
+      return json(res, 200, { ok: false, output: stdout || stderr || e.message });
+    }
+  }
+
+  // =========================================================================
+  // POST /api/devices/approve/:deviceId — Approve mot device
+  // =========================================================================
+  if (route(req, 'POST', '/api/devices/approve/')) {
+    const deviceId = req.url.replace('/api/devices/approve/', '').split('?')[0].trim();
+    if (!deviceId) return json(res, 400, { ok: false, error: 'Missing deviceId' });
+    if (!/^[a-f0-9\-]{30,70}$/.test(deviceId)) {
+      return json(res, 400, { ok: false, error: 'Invalid deviceId format' });
+    }
+    try {
+      const output = dockerExec(`node dist/index.js devices approve ${deviceId}`, 15000);
+      return json(res, 200, { ok: true, output });
+    } catch (e) {
+      const stderr = e.stderr ? e.stderr.toString() : '';
+      const stdout = e.stdout ? e.stdout.toString() : '';
+      return json(res, 200, { ok: false, output: stdout || stderr || e.message });
+    }
+  }
+
+  // =========================================================================
   // POST /api/self-update — Tu dong cap nhat Management API + docker-compose + config templates
   // =========================================================================
   if (route(req, 'POST', '/api/self-update')) {
@@ -4553,7 +4964,7 @@ const server = http.createServer(async (req, res) => {
       } catch {}
 
       const configTemplates = [
-        'anthropic', 'openai', 'google',
+        'anthropic', 'openai', 'openai-codex', 'google',
         'deepseek', 'groq', 'together', 'mistral', 'xai',
         'cerebras', 'sambanova', 'fireworks', 'cohere',
         'yi', 'baichuan', 'stepfun', 'siliconflow', 'novita', 'openrouter',
@@ -4578,6 +4989,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       const allOk = results.every(r => r.ok);
+      // server.js updated successfully = critical part done, restart regardless of template failures
+      const serverJsOk = results.find(r => r.file === `${MGMT_API_DIR}/server.js`)?.ok;
 
       // --- Migrate .env: ensure NODE_OPTIONS is set (80% of system RAM) ---
       try {
@@ -4593,15 +5006,35 @@ const server = http.createServer(async (req, res) => {
         let migrated = false;
         if (liveConfig.gateway) {
           if (!liveConfig.gateway.controlUi) {
-            liveConfig.gateway.controlUi = { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: true };
+            liveConfig.gateway.controlUi = { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: false };
             migrated = true;
           } else {
             const ui = liveConfig.gateway.controlUi;
             if (!ui.allowInsecureAuth) { ui.allowInsecureAuth = true; migrated = true; }
             if (!ui.dangerouslyAllowHostHeaderOriginFallback) { ui.dangerouslyAllowHostHeaderOriginFallback = true; migrated = true; }
-            if (!ui.dangerouslyDisableDeviceAuth) { ui.dangerouslyDisableDeviceAuth = true; migrated = true; }
+            if (ui.dangerouslyDisableDeviceAuth === true) { ui.dangerouslyDisableDeviceAuth = false; migrated = true; }
           }
-        }
+          // Ensure 127.0.0.1 and ::1 in trustedProxies (needed for host network mode)
+          const tp = liveConfig.gateway.trustedProxies || [];
+          if (!tp.includes('127.0.0.1')) { tp.unshift('127.0.0.1'); migrated = true; }
+          if (!tp.includes('::1')) { tp.splice(tp.indexOf('127.0.0.1') + 1, 0, '::1'); migrated = true; }
+          liveConfig.gateway.trustedProxies = tp;
+          // Ensure allowedOrigins in controlUi includes domain
+          const domain = (process.env.DOMAIN || '').replace(/^https?:\/\//, '');
+          const ui2 = liveConfig.gateway.controlUi;
+          if (ui2) {
+            const origins = ui2.allowedOrigins || [];
+            const needed = ['http://localhost', 'http://127.0.0.1'];
+            if (domain && domain !== 'localhost') {
+              needed.unshift(`https://${domain}`, `http://${domain}`);
+            }
+            for (const o of needed) {
+              if (!origins.includes(o)) { origins.push(o); migrated = true; }
+            }
+            ui2.allowedOrigins = origins;
+          }
+        }      
+
         if (migrated) writeConfig(liveConfig);
       } catch {}
 
@@ -4616,8 +5049,9 @@ const server = http.createServer(async (req, res) => {
 
       // Restart management API service (systemd sẽ tự start lại với code mới)
       // Dùng exec async để response kịp trả về trước khi process bị kill
-      if (allOk) {
-        json(res, 200, { ok: true, message: 'Update complete. Management API restarting...', files: results, compose: composeResult });
+      if (serverJsOk) {
+        const msg = allOk ? 'Update complete. Management API restarting...' : 'server.js updated (some templates failed). Management API restarting...';
+        json(res, 200, { ok: allOk, message: msg, files: results, compose: composeResult });
         setTimeout(() => {
           try { execSync('systemctl restart openclaw-mgmt', { timeout: 10000 }); } catch {}
         }, 500);
@@ -5093,12 +5527,386 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, index, removed, remaining: config.bindings.length });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
+  // =========================================================================
+  // POST /api/config/chatgpt-oauth/start — Bat dau ChatGPT OAuth flow
+  // Returns: { sessionId, oauthUrl } — user mo oauthUrl trong browser
+  // =========================================================================
+  if (route(req, 'POST', '/api/config/chatgpt-oauth/start')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const agentId = (body.agentId && isValidAgentId(body.agentId)) ? body.agentId : 'main';
+
+      const codeVerifier = pkceVerifier();
+      const codeChallenge = pkceChallenge(codeVerifier);
+      const state = crypto.randomBytes(16).toString('hex');
+      const sessionId = crypto.randomBytes(16).toString('hex');
+
+      const params = new URLSearchParams({
+        response_type: 'code',
+        client_id: OPENAI_OAUTH_CLIENT_ID,
+        redirect_uri: OPENAI_OAUTH_REDIRECT,
+        scope: OPENAI_OAUTH_SCOPE,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+        state,
+        id_token_add_organizations: 'true',
+        codex_cli_simplified_flow: 'true',
+        originator: 'pi'
+      });
+      const oauthUrl = `${OPENAI_OAUTH_AUTH_URL}?${params.toString()}`;
+
+      pruneOAuthSessions();
+      _oauthSessions[sessionId] = { codeVerifier, state, agentId, createdAt: Date.now() };
+
+      const codexModels = PROVIDERS['openai-codex'].knownModels;
+      return json(res, 200, {
+        ok: true,
+        sessionId,
+        oauthUrl,
+        models: codexModels,
+        defaultModel: codexModels.find(m => m.default)?.id || codexModels[0].id,
+        instructions: 'Open oauthUrl in browser. After login, copy the full redirect URL (localhost:1455/auth/callback?code=...) and POST to /api/config/chatgpt-oauth/complete with { sessionId, redirectUrl, model? }',
+        sessionExpiresIn: OAUTH_SESSION_TTL / 1000
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/config/chatgpt-oauth/complete — Hoan thanh OAuth, luu tokens
+  // Body: { sessionId, redirectUrl, model?, switchProvider? }
+  // redirectUrl: full localhost:1455/auth/callback?code=...&state=... URL
+  // =========================================================================
+  if (route(req, 'POST', '/api/config/chatgpt-oauth/complete')) {
+    try {
+      const body = await parseBody(req);
+      const { sessionId, redirectUrl } = body;
+
+      if (!sessionId) return json(res, 400, { ok: false, error: 'Missing sessionId' });
+      if (!redirectUrl) return json(res, 400, { ok: false, error: 'Missing redirectUrl' });
+
+      pruneOAuthSessions();
+      const session = _oauthSessions[sessionId];
+      if (!session) return json(res, 400, { ok: false, error: 'Session not found or expired. Call /start again.' });
+
+      // Parse authorization code (flexible: full URL, code=... query, or raw code)
+      let code, returnedState;
+      const trimmed = redirectUrl.trim();
+      try {
+        // Try full URL first
+        const u = new URL(trimmed.startsWith('http') ? trimmed : 'http://localhost/?' + trimmed);
+        code = u.searchParams.get('code') || undefined;
+        returnedState = u.searchParams.get('state') || undefined;
+      } catch {
+        // Fallback: raw code
+        code = trimmed.includes('#') ? trimmed.split('#')[0] : trimmed;
+      }
+      if (!code) return json(res, 400, { ok: false, error: 'No "code" found in redirectUrl' });
+
+      // Validate state if present
+      if (returnedState && returnedState !== session.state) {
+        delete _oauthSessions[sessionId];
+        return json(res, 400, { ok: false, error: 'State mismatch — possible CSRF. Start a new session.' });
+      }
+
+      // Exchange code for tokens
+      let raw;
+      try {
+        raw = exchangeOAuthCode(code, session.codeVerifier);
+      } catch (e) {
+        return json(res, 502, { ok: false, error: 'Token exchange failed: ' + e.message });
+      }
+      if (!raw || !raw.access_token) {
+        return json(res, 502, { ok: false, error: 'Token exchange failed: no access_token in response', details: raw });
+      }
+
+      // Normalize to openclaw's field format (access/refresh/expires in ms)
+      const tokens = {
+        access: raw.access_token,
+        refresh: raw.refresh_token,
+        expires: typeof raw.expires_in === 'number' ? Date.now() + raw.expires_in * 1000 : null
+      };
+
+      // Store tokens in auth-profiles.json using openclaw's exact format
+      const stored = storeOAuthTokens(tokens, session.agentId);
+      delete _oauthSessions[sessionId];
+
+      // Switch provider to openai-codex (default: true unless switchProvider=false)
+      const shouldSwitch = body.switchProvider !== false;
+      let switchedModel = null;
+      if (shouldSwitch) {
+        try {
+          const finalModel = body.model || 'openai-codex/gpt-5.4';
+          let config;
+          try { config = readConfig(); } catch { config = {}; }
+          if (!config.agents) config.agents = { defaults: { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } } };
+          if (!config.agents.defaults) config.agents.defaults = { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } };
+          if (!config.agents.defaults.model) config.agents.defaults.model = {};
+          config.agents.defaults.model.primary = finalModel;
+          writeConfig(config);
+          restartContainer('openclaw');
+          switchedModel = finalModel;
+        } catch (e) {
+          return json(res, 200, { ok: true, agentId: session.agentId, tokensStored: true, profileKey: stored.profileKey, accountId: stored.accountId, switchedProvider: false, switchError: e.message });
+        }
+      } else {
+        restartContainer('openclaw');
+      }
+
+      return json(res, 200, {
+        ok: true,
+        agentId: session.agentId,
+        tokensStored: true,
+        profileKey: stored.profileKey,
+        accountId: stored.accountId,
+        email: stored.email,
+        switchedProvider: shouldSwitch,
+        model: switchedModel
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/config/chatgpt-oauth/refresh — Manual refresh token
+  // Body: { agentId? }
+  // =========================================================================
+  if (route(req, 'POST', '/api/config/chatgpt-oauth/refresh')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const agentId = (body.agentId && isValidAgentId(body.agentId)) ? body.agentId : 'main';
+
+      const profile = getOAuthProfile(agentId);
+      if (!profile) return json(res, 404, { ok: false, error: `No OAuth token found for agent "${agentId}". Complete OAuth flow first.` });
+      if (!profile.refresh) return json(res, 400, { ok: false, error: 'No refresh token stored. Must re-authenticate via /start + /complete.' });
+
+      const tokens = refreshOAuthToken(profile.refresh);
+      if (!tokens || !tokens.access) {
+        return json(res, 502, { ok: false, error: 'Refresh failed: no access_token in response' });
+      }
+
+      storeOAuthTokens(tokens, agentId);
+      restartContainer('openclaw');
+
+      const expiresInMs = tokens.expires ? tokens.expires - Date.now() : null;
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        expiresIn: expiresInMs ? Math.round(expiresInMs / 1000) : null,
+        expiresAt: tokens.expires || null
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/config/chatgpt-oauth/status — Xem trang thai OAuth token hien tai
+  // =========================================================================
+  if (route(req, 'GET', '/api/config/chatgpt-oauth/status')) {
+    try {
+      const { query } = route(req, 'GET', '/api/config/chatgpt-oauth/status');
+      const agentId = (query && query.agentId && isValidAgentId(query.agentId)) ? query.agentId : 'main';
+      const profile = getOAuthProfile(agentId);
+      pruneOAuthSessions();
+      const now = Date.now();
+      const expires = profile ? profile.expires : null;
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        hasOAuthToken: !!profile,
+        profileKey: profile ? profile.key : null,
+        accountId: profile ? profile.accountId : null,
+        hasRefreshToken: profile ? !!profile.refresh : false,
+        expiresAt: expires,
+        expiresIn: expires ? Math.max(0, Math.round((expires - now) / 1000)) : null,
+        expired: expires ? expires < now : null,
+        activeSessions: Object.keys(_oauthSessions).length
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
 
   // =========================================================================
   // 404
   // =========================================================================
   json(res, 404, { ok: false, error: 'Not found' });
 });
+
+// =============================================================================
+// Terminal GUI HTML Page
+// =============================================================================
+const TERMINAL_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>OpenClaw Terminal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+#layout{display:flex;flex-direction:column;height:100vh}
+#hdr{display:flex;align-items:center;gap:8px;padding:6px 12px;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0}
+.logo{font-size:15px;font-weight:700;color:#58a6ff;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:#484f58;flex-shrink:0;transition:background .3s}
+.dot.on{background:#3fb950}.dot.off{background:#f85149}
+#tw{display:flex;gap:6px;flex:1;min-width:0}
+#tok{flex:1;min-width:0;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;padding:5px 10px;font-size:13px;outline:none;font-family:monospace}
+#tok:focus{border-color:#58a6ff}
+.hb{padding:5px 12px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;white-space:nowrap;transition:background .15s}
+.con{background:#238636;color:#fff}.con:hover{background:#2ea043}
+.clr{background:#21262d;color:#8b949e;border:1px solid #30363d}.clr:hover{color:#c9d1d9}
+#qbar{display:flex;align-items:center;gap:4px;padding:5px 12px;background:#0d1117;border-bottom:1px solid #21262d;flex-shrink:0;overflow-x:auto;white-space:nowrap}
+#qbar::-webkit-scrollbar{height:3px}#qbar::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
+.ql{font-size:11px;color:#484f58;margin-right:4px}
+.qb{padding:3px 9px;background:#161b22;border:1px solid #21262d;border-radius:4px;color:#8b949e;font-size:12px;cursor:pointer;transition:all .15s}
+.qb:hover{color:#e6edf3;border-color:#58a6ff}
+#tw2{flex:1;overflow:hidden;padding:4px 2px 2px}
+.xterm-viewport::-webkit-scrollbar{width:6px}
+.xterm-viewport::-webkit-scrollbar-thumb{background:#21262d;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="layout">
+  <div id="hdr">
+    <span class="dot" id="dot"></span>
+    <span class="logo">\u{1F980} OpenClaw Terminal</span>
+    <div id="tw">
+      <input type="password" id="tok" placeholder="Management API Key..." autocomplete="off" spellcheck="false">
+      <button class="hb con" onclick="doConnect()">Connect</button>
+      <button class="hb clr" onclick="doClear()">Clear</button>
+    </div>
+  </div>
+  <div id="qbar">
+    <span class="ql">Quick:</span>
+    <button class="qb" onclick="q('docker compose ps')">status</button>
+    <button class="qb" onclick="q('docker compose logs --tail=80 openclaw')">logs</button>
+    <button class="qb" onclick="q('docker compose logs -f openclaw')">logs -f</button>
+    <button class="qb" onclick="q('docker compose restart openclaw')">restart</button>
+    <button class="qb" onclick="q('docker compose pull openclaw')">pull</button>
+    <button class="qb" onclick="q('docker compose up -d')">up -d</button>
+    <button class="qb" onclick="q('docker compose down')">down</button>
+    <button class="qb" onclick="q('docker compose stats --no-stream openclaw')">stats</button>
+    <button class="qb" onclick="q('df -h')">df</button>
+    <button class="qb" onclick="q('free -h')">free</button>
+    <button class="qb" onclick="q('uptime')">uptime</button>
+    <button class="qb" onclick="q('openclaw models scan')">models scan</button>
+    <button class="qb" onclick="q('openclaw channels list')">channels</button>
+    <button class="qb" onclick="q('openclaw version')">version</button>
+  </div>
+  <div id="tw2"><div id="terminal"></div></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+var TK='oc_mgmt_token', HK='oc_term_hist';
+var term, fit, buf='', hist=[], hidx=-1, running=false, sse=null, tok='', conn=false;
+try{hist=JSON.parse(localStorage.getItem(HK)||'[]');}catch(e){}
+try{tok=localStorage.getItem(TK)||'';}catch(e){}
+
+function initTerm(){
+  term=new Terminal({
+    cursorBlink:true,
+    fontFamily:'"Cascadia Code","JetBrains Mono","Courier New",monospace',
+    fontSize:14,lineHeight:1.3,scrollback:5000,
+    theme:{
+      background:'#0d1117',foreground:'#c9d1d9',cursor:'#58a6ff',
+      selectionBackground:'#264f78',
+      black:'#484f58',red:'#f85149',green:'#3fb950',yellow:'#d29922',
+      blue:'#58a6ff',magenta:'#bc8cff',cyan:'#76e3ea',white:'#b1bac4',
+      brightBlack:'#6e7681',brightRed:'#ff7b72',brightGreen:'#56d364',
+      brightYellow:'#e3b341',brightBlue:'#79c0ff',brightMagenta:'#d2a8ff',
+      brightCyan:'#87deea',brightWhite:'#f0f6fc'
+    }
+  });
+  fit=new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('terminal'));
+  fit.fit();
+  window.addEventListener('resize',function(){fit.fit();});
+  term.onKey(function(e){handleKey(e.key,e.domEvent);});
+}
+
+function handleKey(key,e){
+  if(running){
+    if(e.ctrlKey&&e.key==='c'){killSSE();term.write('^C\\r\\n');prompt();}
+    return;
+  }
+  if(e.ctrlKey){if(e.key==='l'){term.clear();prompt();}return;}
+  if(e.key==='Enter'){
+    var cmd=buf.trim();term.write('\\r\\n');buf='';hidx=-1;
+    if(cmd){
+      if(!hist.length||hist[0]!==cmd){hist.unshift(cmd);if(hist.length>200)hist.pop();try{localStorage.setItem(HK,JSON.stringify(hist));}catch(ex){}}
+      execCmd(cmd);
+    }else{prompt();}
+  }else if(e.key==='Backspace'){
+    if(buf.length){buf=buf.slice(0,-1);term.write('\\b \\b');}
+  }else if(e.key==='ArrowUp'){
+    if(hidx<hist.length-1){hidx++;clearBuf();buf=hist[hidx];term.write(buf);}
+  }else if(e.key==='ArrowDown'){
+    if(hidx>0){hidx--;clearBuf();buf=hist[hidx];term.write(buf);}
+    else if(hidx===0){hidx=-1;clearBuf();}
+  }else if(!e.altKey&&!e.metaKey&&key.length===1){buf+=key;term.write(key);}
+}
+
+function clearBuf(){if(buf.length)term.write('\\b \\b'.repeat(buf.length));buf='';}
+function prompt(){if(conn)term.write('\\x1b[32m$\\x1b[0m ');}
+
+function killSSE(){if(sse){try{sse.close();}catch(e){}sse=null;}running=false;}
+
+function execCmd(cmd){
+  if(!conn||!tok){term.write('\\x1b[31mNot connected\\x1b[0m\\r\\n');prompt();return;}
+  running=true;
+  sse=new EventSource('/api/terminal/stream?cmd='+encodeURIComponent(cmd)+'&token='+encodeURIComponent(tok));
+  sse.onmessage=function(ev){
+    try{
+      var d=JSON.parse(ev.data);
+      if(d.type==='stdout')term.write(d.text.replace(/\\n/g,'\\r\\n').replace(/\\r\\r\\n/g,'\\r\\n'));
+      else if(d.type==='stderr')term.write('\\x1b[33m'+d.text.replace(/\\n/g,'\\r\\n')+'\\x1b[0m');
+      else if(d.type==='error'){term.write('\\x1b[31m'+d.text+'\\x1b[0m\\r\\n');killSSE();prompt();}
+      else if(d.type==='exit'){if(d.code)term.write('\\r\\n\\x1b[2m[exit '+d.code+']\\x1b[0m');term.write('\\r\\n');killSSE();prompt();}
+    }catch(ex){}
+  };
+  sse.onerror=function(){term.write('\\r\\n\\x1b[31m[stream error]\\x1b[0m\\r\\n');killSSE();prompt();};
+}
+
+function doConnect(){
+  var v=document.getElementById('tok').value.trim();
+  if(v){tok=v;try{localStorage.setItem(TK,v);}catch(e){}}
+  if(!tok){term.write('\\x1b[31mEnter Management API Key\\x1b[0m\\r\\n');return;}
+  fetch('/api/status',{headers:{Authorization:'Bearer '+tok}})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d.status||d.ok!==false){
+        conn=true;
+        document.getElementById('dot').className='dot on';
+        term.write('\\x1b[32mConnected!\\x1b[0m  (Ctrl+C = cancel, Ctrl+L = clear)\\r\\n\\r\\n');
+        prompt();
+      }else{
+        term.write('\\x1b[31mAuth failed: '+(d.error||'check your key')+'\\x1b[0m\\r\\n');
+        document.getElementById('dot').className='dot off';
+      }
+    }).catch(function(){
+      term.write('\\x1b[31mConnection error\\x1b[0m\\r\\n');
+      document.getElementById('dot').className='dot off';
+    });
+}
+
+function doClear(){if(term){term.clear();if(conn)prompt();}}
+
+function q(cmd){
+  if(!conn){term.write('\\x1b[33mConnect first (enter API key + click Connect)\\x1b[0m\\r\\n');return;}
+  if(running)killSSE();
+  clearBuf();
+  term.write('\\x1b[32m$\\x1b[0m '+cmd+'\\r\\n');
+  execCmd(cmd);
+}
+
+window.addEventListener('DOMContentLoaded',function(){
+  initTerm();
+  if(tok)document.getElementById('tok').placeholder='Key saved \u2014 click Connect';
+  term.write('\\x1b[1;34m OpenClaw Terminal\\x1b[0m\\r\\n');
+  term.write('\\x1b[2m \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\x1b[0m\\r\\n');
+  term.write('\\x1b[2m Allowed cmds: docker compose ..., openclaw ...\\x1b[0m\\r\\n');
+  term.write('\\x1b[2m               df, free, uptime, ps, date\\x1b[0m\\r\\n\\r\\n');
+  term.write('\\x1b[2m Enter API key above and click Connect\\x1b[0m\\r\\n\\r\\n');
+});
+</script>
+</body>
+</html>`;
 
 // =============================================================================
 // Login HTML Page
@@ -5206,6 +6014,33 @@ try {
     try { dockerCompose('up -d openclaw', 60000); } catch {}
   }
 } catch {}
+// =============================================================================
+// Auto-refresh OAuth tokens background job (runs every 5 minutes)
+// =============================================================================
+setInterval(() => {
+  try {
+    // Collect all known agent IDs from config + scan agents dir
+    const agentIds = new Set(['main']);
+    try {
+      const config = JSON.parse(fs.readFileSync(`${CONFIG_DIR}/openclaw.json`, 'utf8'));
+      for (const a of (config?.agents?.list || [])) {
+        if (a.id) agentIds.add(a.id);
+      }
+    } catch {}
+    try {
+      for (const d of fs.readdirSync(`${CONFIG_DIR}/agents`)) agentIds.add(d);
+    } catch {}
+
+    let anyRefreshed = false;
+    for (const agentId of agentIds) {
+      const result = tryRefreshAgent(agentId);
+      if (result === 'refreshed') anyRefreshed = true;
+    }
+    if (anyRefreshed) restartContainer('openclaw');
+  } catch (e) {
+    console.error(`[OAuth] Auto-refresh job error: ${e.message}`);
+  }
+}, 5 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Management API] Running on http://0.0.0.0:${PORT}`);

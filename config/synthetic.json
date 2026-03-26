@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "synthetic/gpt-5"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,15 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "synthetic": {
+        "baseUrl": "https://api.synthetic.new/openai/v1",
+        "apiKey": "${SYNTHETIC_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "gpt-5", "name": "GPT 5" },
+          { "id": "claude-sonnet-4", "name": "Claude Sonnet 4" },
+          { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro" },
+          { "id": "deepseek-v3.1", "name": "DeepSeek V3.1" }
         ]
       }
     }

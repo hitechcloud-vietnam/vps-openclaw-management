@@ -1,0 +1,56 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "minimax-cn/minimax-m2.7"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "minimax-cn": {
+        "baseUrl": "https://api.minimaxi.com/anthropic/v1/messages",
+        "apiKey": "${MINIMAX_CN_API_KEY}",
+        "api": "claude",
+        "authHeader": "x-api-key",
+        "urlSuffix": "?beta=true",
+        "headers": {
+          "Anthropic-Version": "2023-06-01",
+          "Anthropic-Beta": "claude-code-20250219,interleaved-thinking-2025-05-14"
+        },
+        "models": [
+          { "id": "minimax-m2.7", "name": "MiniMax M2.7" },
+          { "id": "MiniMax-M2.7", "name": "MiniMax M2.7 (Legacy Alias)" },
+          { "id": "minimax-m2.7-highspeed", "name": "MiniMax M2.7 Highspeed" },
+          { "id": "minimax-m2.5", "name": "MiniMax M2.5" },
+          { "id": "MiniMax-M2.5", "name": "MiniMax M2.5 (Legacy Alias)" },
+          { "id": "MiniMax-M2.1", "name": "MiniMax M2.1" }
+        ]
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "token": "${OPENCLAW_GATEWAY_TOKEN}"
+    },
+    "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "controlUi": {
+      "enabled": true,
+      "allowInsecureAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "dangerouslyDisableDeviceAuth": false
+    }
+  },
+  "browser": {
+    "headless": true,
+    "defaultProfile": "openclaw",
+    "noSandbox": true
+  }
+}

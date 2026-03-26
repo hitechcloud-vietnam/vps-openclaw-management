@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "mistral/mistral-large-latest"
+        "primary": "cloudflare-ai/@cf/meta/llama-3.3-70b-instruct"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -13,14 +13,17 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "mistral": {
-        "baseUrl": "https://api.mistral.ai/v1",
-        "apiKey": "${MISTRAL_API_KEY}",
+      "cloudflare-ai": {
+        "baseUrl": "https://api.cloudflare.com/client/v4/accounts",
+        "apiKey": "${CLOUDFLARE_AI_API_KEY}",
         "api": "openai-completions",
         "models": [
-          { "id": "mistral-large-latest", "name": "Mistral Large" },
-          { "id": "mistral-small-latest", "name": "Mistral Small" },
-          { "id": "codestral-latest", "name": "Codestral" }
+          { "id": "@cf/meta/llama-3.3-70b-instruct", "name": "Llama 3.3 70B" },
+          { "id": "@cf/meta/llama-3.1-8b-instruct", "name": "Llama 3.1 8B" },
+          { "id": "@cf/google/gemma-3-12b-it", "name": "Gemma 3 12B" },
+          { "id": "@cf/mistral/mistral-7b-instruct-v0.2-lora", "name": "Mistral 7B" },
+          { "id": "@cf/qwen/qwen2.5-coder-15b-instruct", "name": "Qwen 2.5 Coder 15B" },
+          { "id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", "name": "DeepSeek R1 Distill 32B" }
         ]
       }
     }
