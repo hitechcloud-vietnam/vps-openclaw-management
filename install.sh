@@ -20,6 +20,7 @@ MGMT_API_PORT=9998
 LOG_FILE="/var/log/openclaw-install.log"
 
 # --- Parse arguments ---
+# Usage: install.sh [--mgmt-key <key>] [--domain <domain>]
 MGMT_API_KEY_ARG=""
 DOMAIN_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -31,9 +32,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Logging ---
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-log "=== Bat dau cai dat OpenClaw (Bare-metal) ==="
+log "=== Bat dau cai dat OpenClaw (Docker Compose) ==="
 
 # =============================================================================
 # 1. Tat unattended-upgrades + doi apt lock
@@ -47,19 +48,22 @@ systemctl kill --kill-who=all apt-daily.service apt-daily-upgrade.service unatte
 killall -9 unattended-upgr apt apt-get dpkg 2>/dev/null || true
 sleep 3
 
+# Giai phong lock files + xoa dpkg updates corrupt
 rm -f /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
 rm -f /var/lib/dpkg/updates/* 2>/dev/null || true
 dpkg --force-confdef --force-confold --configure -a 2>/dev/null || true
 
 is_apt_locked() {
+    # Dung lsof neu co, fallback sang thu apt-get
     if command -v lsof &>/dev/null; then
         lsof /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null | grep -q .
         return $?
     fi
+    # Fallback: thu chay apt-get, neu lock thi exit code != 0
     if apt-get check -qq 2>&1 | grep -q "Could not get lock"; then
-        return 0
+        return 0  # locked
     fi
-    return 1
+    return 1  # not locked
 }
 
 wait_for_apt() {
@@ -85,7 +89,9 @@ log "Doi apt lock..."
 wait_for_apt
 
 # =============================================================================
-# 1b. Kiem tra DNS domain
+# 1b. Kiem tra DNS domain (neu co truyen --domain)
+# Neu DNS chua resolve dung IP → dung self-signed cert, cai dat luon khong doi
+# Sau khi DNS san sang, dung Management API PUT /api/domain de chuyen Let's Encrypt
 # =============================================================================
 DNS_READY=false
 if [ -n "${DOMAIN_ARG}" ]; then
@@ -147,48 +153,26 @@ apt_retry apt-get -qqy -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='
     curl ca-certificates gnupg ufw fail2ban jq dnsutils
 
 # =============================================================================
-# 3. Cai dat Node.js 24 (cho OpenClaw + Management API)
+# 3. Cai dat Docker Engine
 # =============================================================================
-log "Cai dat Node.js 24..."
-if ! command -v node &>/dev/null || [[ "$(node -v)" != v24* ]]; then
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+log "Cai dat Docker..."
+if ! command -v docker &>/dev/null; then
+    curl -fsSL https://get.docker.com | bash
+fi
+systemctl enable docker
+systemctl start docker
+
+# =============================================================================
+# 4. Cai dat Node.js 22 (cho Management API)
+# =============================================================================
+log "Cai dat Node.js 22..."
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     apt-get install -y nodejs
 fi
-log "Node.js version: $(node -v)"
 
 # =============================================================================
-# 4. Cai dat OpenClaw (npm global)
-# =============================================================================
-log "Cai dat OpenClaw..."
-npm install -g openclaw@latest
-log "OpenClaw version: $(openclaw --version 2>/dev/null || echo 'unknown')"
-
-# =============================================================================
-# 5. Cai dat Google Chrome (headless browser cho OpenClaw)
-# =============================================================================
-log "Cai dat Google Chrome..."
-if ! command -v google-chrome &>/dev/null; then
-    curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
-    apt-get install -y /tmp/chrome.deb
-    rm -f /tmp/chrome.deb
-fi
-log "Chrome version: $(google-chrome --version 2>/dev/null || echo 'not installed')"
-
-# =============================================================================
-# 6. Cai dat Caddy (apt)
-# =============================================================================
-log "Cai dat Caddy..."
-if ! command -v caddy &>/dev/null; then
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-    apt-get update
-    apt-get install -y caddy
-fi
-log "Caddy version: $(caddy version 2>/dev/null || echo 'unknown')"
-
-# =============================================================================
-# 6. Cau hinh tuong lua (UFW)
+# 5. Cau hinh tuong lua (UFW)
 # =============================================================================
 log "Cau hinh tuong lua..."
 ufw allow 80
@@ -198,22 +182,15 @@ ufw limit ssh/tcp
 ufw --force enable
 
 # =============================================================================
-# 7. Tao thu muc cai dat
+# 6. Tao thu muc cai dat
 # =============================================================================
 log "Tao thu muc cai dat..."
 mkdir -p ${INSTALL_DIR}/config
 mkdir -p ${INSTALL_DIR}/data
-mkdir -p ${INSTALL_DIR}/.openclaw
 mkdir -p ${MGMT_API_DIR}
 
-# Symlink config -> .openclaw (OpenClaw reads from HOME/.openclaw)
-if [ ! -L "${INSTALL_DIR}/.openclaw" ] || [ "$(readlink -f ${INSTALL_DIR}/.openclaw)" != "${INSTALL_DIR}/config" ]; then
-    rm -rf ${INSTALL_DIR}/.openclaw
-    ln -sf ${INSTALL_DIR}/config ${INSTALL_DIR}/.openclaw
-fi
-
 # =============================================================================
-# 8. Sinh tokens
+# 7. Sinh tokens
 # =============================================================================
 log "Sinh gateway token va management API key..."
 GATEWAY_TOKEN=$(openssl rand -hex 32)
@@ -226,14 +203,15 @@ else
 fi
 
 # =============================================================================
-# 9. Tao file .env
+# 8. Tao file .env
 # =============================================================================
 log "Tao file .env..."
 DROPLET_IP=$(hostname -I | awk '{print $1}')
 
+# Xac dinh Caddy TLS config dua tren domain
 if [ -n "${DOMAIN_ARG}" ] && [ "${DNS_READY}" = "true" ]; then
     CADDY_DOMAIN="${DOMAIN_ARG}"
-    CADDY_TLS_VALUE=""
+    CADDY_TLS_VALUE=""  # Empty = Caddy auto Let's Encrypt for real domains
 elif [ -n "${DOMAIN_ARG}" ]; then
     CADDY_DOMAIN="${DOMAIN_ARG}"
     CADDY_TLS_VALUE="tls internal"
@@ -244,7 +222,7 @@ fi
 
 cat > ${INSTALL_DIR}/.env << EOF
 # OpenClaw Environment Configuration
-# Sau khi thay doi, restart: systemctl restart openclaw
+# Sau khi thay doi, restart: docker compose restart openclaw
 
 # Version
 OPENCLAW_VERSION=${APP_VERSION}
@@ -254,6 +232,8 @@ OPENCLAW_GATEWAY_PORT=18789
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 
 # Domain & TLS (Caddy)
+# DOMAIN: ten mien hoac http://IP
+# CADDY_TLS: empty = auto Let's Encrypt, "tls internal" = self-signed
 DOMAIN=${CADDY_DOMAIN}
 CADDY_TLS=${CADDY_TLS_VALUE}
 
@@ -294,7 +274,13 @@ NODE_OPTIONS=--max-old-space-size=$(( $(free -m | awk '/^Mem:/{print $2}') * 80 
 EOF
 
 # =============================================================================
-# 10. Download Caddyfile template
+# 9. Download docker-compose.yml
+# =============================================================================
+log "Download docker-compose.yml..."
+curl -fsSL "${REPO_RAW}/docker-compose.yml" -o ${INSTALL_DIR}/docker-compose.yml
+
+# =============================================================================
+# 10. Download Caddyfile template (dung env vars tu .env)
 # =============================================================================
 log "Download Caddyfile template..."
 curl -fsSL "${REPO_RAW}/Caddyfile" -o ${INSTALL_DIR}/Caddyfile
@@ -325,12 +311,12 @@ cat > /etc/openclaw/config/anthropic.json << 'CONFIGEOF'
     "auth": {
       "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
-    "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "trustedProxies": ["172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
     "controlUi": {
       "enabled": true,
       "allowInsecureAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": true
     }
   },
   "browser": {
@@ -361,12 +347,12 @@ cat > /etc/openclaw/config/openai.json << 'CONFIGEOF'
     "auth": {
       "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
-    "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "trustedProxies": ["172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
     "controlUi": {
       "enabled": true,
       "allowInsecureAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": true
     }
   },
   "browser": {
@@ -397,12 +383,12 @@ cat > /etc/openclaw/config/google.json << 'CONFIGEOF'
     "auth": {
       "token": "${OPENCLAW_GATEWAY_TOKEN}"
     },
-    "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "trustedProxies": ["172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
     "controlUi": {
       "enabled": true,
       "allowInsecureAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyDisableDeviceAuth": true
     }
   },
   "browser": {
@@ -421,116 +407,51 @@ done
 
 # Copy default config (Anthropic) va inject gateway token
 cp /etc/openclaw/config/anthropic.json ${INSTALL_DIR}/config/openclaw.json
-if [ -n "${DOMAIN_ARG}" ]; then
-    ORIGINS_FILTER='.gateway.controlUi.allowedOrigins = ["https://\($domain)", "http://\($domain)", "http://localhost", "http://127.0.0.1"]'
-else
-    ORIGINS_FILTER='.gateway.controlUi.allowedOrigins = ["http://localhost", "http://127.0.0.1"]'
-fi
-jq --arg token "${GATEWAY_TOKEN}" --arg domain "${DOMAIN_ARG}" '
+# Thay the placeholder token bang token thuc, them plugins mac dinh (zalo)
+jq --arg token "${GATEWAY_TOKEN}" '
   .gateway.auth.token = $token |
-  .gateway.controlUi.allowedOrigins = (
-    if $domain != "" then ["https://\($domain)", "http://\($domain)", "http://localhost", "http://127.0.0.1"]
-    else ["http://localhost", "http://127.0.0.1"]
-    end
-  ) |
   .plugins = { "entries": { "zalo": { "enabled": true } } }
 ' ${INSTALL_DIR}/config/openclaw.json > ${INSTALL_DIR}/config/openclaw.json.tmp
 mv ${INSTALL_DIR}/config/openclaw.json.tmp ${INSTALL_DIR}/config/openclaw.json
 
-# Tao thu muc auth-profiles
+# Tao thu muc auth-profiles (de Management API co the ghi API keys)
 mkdir -p ${INSTALL_DIR}/config/agents/main/agent
-mkdir -p ${INSTALL_DIR}/config/agents/main/sessions
 
 # =============================================================================
-# 12. Tao systemd services
+# 12. Pull images va start containers
 # =============================================================================
-log "Tao systemd service cho OpenClaw..."
-cat > /etc/systemd/system/openclaw.service << EOF
-[Unit]
-Description=OpenClaw Gateway
-After=network-online.target caddy.service
-Wants=network-online.target
+log "Pull Docker images..."
+cd ${INSTALL_DIR}
+docker compose pull
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${INSTALL_DIR}
-EnvironmentFile=${INSTALL_DIR}/.env
-Environment=HOME=${INSTALL_DIR}
-Environment=NODE_ENV=production
-Environment=OPENCLAW_GATEWAY_BIND=lan
-ExecStart=$(which openclaw) gateway --port 18789 --allow-unconfigured
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+log "Start Docker containers..."
+docker compose up -d
 
-[Install]
-WantedBy=multi-user.target
-EOF
+# Doi container san sang
+log "Doi container san sang..."
+sleep 5
 
-# Caddy systemd override (dung Caddyfile va .env cua OpenClaw)
-log "Cau hinh Caddy systemd override..."
-mkdir -p /etc/systemd/system/caddy.service.d
-cat > /etc/systemd/system/caddy.service.d/override.conf << EOF
-[Service]
-EnvironmentFile=${INSTALL_DIR}/.env
-ExecStart=
-ExecStart=$(which caddy) run --environ --config ${INSTALL_DIR}/Caddyfile --adapter caddyfile
-EOF
-
-systemctl daemon-reload
-
-# Start OpenClaw
-log "Start OpenClaw..."
-systemctl enable openclaw
-systemctl start openclaw
-
-# Start Caddy
-log "Start Caddy..."
-systemctl enable caddy
-systemctl restart caddy
-
-# Doi OpenClaw san sang
-log "Doi OpenClaw san sang..."
-for i in $(seq 1 24); do
-    if curl -sf http://localhost:18789/healthz >/dev/null 2>&1; then
-        log "OpenClaw san sang sau ${i}x5s."
-        break
-    fi
-    sleep 5
-done
-
-# =============================================================================
-# 13. Auto-approve devices
-# =============================================================================
-log "Auto-approve pending devices..."
-DEVICES_RAW=$(openclaw devices list --json 2>&1 || true)
-DEVICES_JSON=$(echo "$DEVICES_RAW" | grep -Pzo '\{[\s\S]*\}$' | tr -d '\0' || true)
-REQUEST_IDS=$(echo "$DEVICES_JSON" | jq -r '.pending[]?.requestId // empty' 2>/dev/null || true)
-if [ -n "$REQUEST_IDS" ]; then
-    while IFS= read -r rid; do
-        openclaw devices approve "$rid" 2>/dev/null && \
-            log "Approved device request: $rid" || \
-            log "Canh bao: Khong approve duoc device request $rid"
-    done <<< "$REQUEST_IDS"
+if docker inspect openclaw --format '{{.State.Status}}' 2>/dev/null | grep -q "running"; then
+    log "OpenClaw container dang chay."
 else
-    log "Khong co device nao can approve (Management API se tu dong approve khi user pair)."
+    log "Canh bao: OpenClaw container chua san sang. Kiem tra: docker compose logs openclaw"
 fi
 
 # =============================================================================
-# 14. Cai dat Management API
+# 13. Cai dat Management API
 # =============================================================================
 log "Cai dat Management API..."
 curl -fsSL "${REPO_RAW}/management-api/server.js" -o ${MGMT_API_DIR}/server.js || {
     log "Canh bao: Khong tai duoc Management API server.js"
 }
 
+# Tao systemd service
 cat > /etc/systemd/system/openclaw-mgmt.service << EOF
 [Unit]
 Description=OpenClaw Management API
-After=network-online.target openclaw.service
+After=network-online.target docker.service
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
@@ -551,14 +472,14 @@ systemctl enable openclaw-mgmt
 systemctl start openclaw-mgmt
 
 # =============================================================================
-# 15. Cau hinh fail2ban
+# 14. Cau hinh fail2ban
 # =============================================================================
 log "Cau hinh fail2ban..."
 systemctl enable fail2ban
 systemctl restart fail2ban
 
 # =============================================================================
-# 16. Don dep
+# 15. Don dep
 # =============================================================================
 log "Don dep..."
 apt-get -qqy autoremove
@@ -576,7 +497,7 @@ if [ -n "${DOMAIN_ARG}" ]; then
 else
     DASHBOARD_SCHEME="http"
 fi
-log "  Dashboard: http://${DROPLET_IP}:${MGMT_API_PORT}/pair?token=${GATEWAY_TOKEN}"
+log "  Dashboard: ${DASHBOARD_SCHEME}://${DASHBOARD_HOST}?token=${GATEWAY_TOKEN}"
 log "  Gateway Token: ${GATEWAY_TOKEN}"
 log ""
 log "  Management API: http://${DROPLET_IP}:${MGMT_API_PORT}"
@@ -584,7 +505,6 @@ log "  MGMT API Key:   ${MGMT_API_KEY}"
 log "=========================================="
 log ""
 log "Quan ly:"
-log "  systemctl status openclaw        # Trang thai"
-log "  journalctl -u openclaw -f        # Xem logs"
-log "  systemctl restart openclaw       # Restart"
-log "  systemctl stop openclaw          # Stop"
+log "  docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f"
+log "  docker compose -f ${INSTALL_DIR}/docker-compose.yml restart"
+log "  docker compose -f ${INSTALL_DIR}/docker-compose.yml down"
