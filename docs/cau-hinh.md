@@ -1,52 +1,49 @@
-# Detailed Configuration
+# Cấu hình chi tiết
 
-## Table of Contents
+## Mục lục
 
-- [1. Change AI Model](#1-change-ai-model)
-- [2. Manage API Keys](#2-manage-api-keys)
-- [3. Gateway Configuration](#3-gateway-configuration)
-- [4. Browser Configuration](#4-browser-configuration)
-- [5. .env File — Environment Variables](#5-env-file--environment-variables)
-- [6. View Current Configuration](#6-view-current-configuration)
+- [1. Đổi model AI](#1-đổi-model-ai)
+- [2. Quản lý API Keys](#2-quản-lý-api-keys)
+- [3. Cấu hình Gateway](#3-cấu-hình-gateway)
+- [4. Cấu hình Browser](#4-cấu-hình-browser)
+- [5. File .env — Biến môi trường](#5-file-env--biến-môi-trường)
+- [6. Xem cấu hình hiện tại](#6-xem-cấu-hình-hiện-tại)
 
 ---
 
-## 1. Change AI Model
+## 1. Đổi model AI
 
-### Supported Providers
+### Các nhà cung cấp được hỗ trợ
 
-| Provider                  | Provider ID | Default Model                      |
-|---------------------------|-------------|------------------------------------|
-| Anthropic (Claude)        | `anthropic` | `anthropic/claude-opus-4-5`        |
-| OpenAI (GPT)              | `openai`    | `openai/gpt-5.2`                   |
-| Google (Gemini)           | `gemini`    | `google/gemini-2.5-pro`            |
+| Nhà cung cấp | Provider ID | Model mặc định |
+|---|---|---|
+| Anthropic (Claude) | `anthropic` | `anthropic/claude-opus-4-5` |
+| OpenAI (GPT) | `openai` | `openai/gpt-5.2` |
+| Google (Gemini) | `gemini` | `google/gemini-2.5-pro` |
 
-### Popular Models List
+### Danh sách model phổ biến
 
 **Anthropic:**
-
-| Model               | ID                                   |
-|---------------------|--------------------------------------|
-| Claude Opus 4.5     | `anthropic/claude-opus-4-5`          |
-| Claude Sonnet 4     | `anthropic/claude-sonnet-4-20250514` |
-| Claude Haiku 3.5    | `anthropic/claude-haiku-3-5-20241022`|
+| Model | ID |
+|---|---|
+| Claude Opus 4.5 | `anthropic/claude-opus-4-5` |
+| Claude Sonnet 4 | `anthropic/claude-sonnet-4-20250514` |
+| Claude Haiku 3.5 | `anthropic/claude-haiku-3-5-20241022` |
 
 **OpenAI:**
-
-| Model        | ID                    |
-|--------------|-----------------------|
-| GPT-5.2      | `openai/gpt-5.2`      |
-| GPT-4o       | `openai/gpt-4o`       |
-| GPT-4o Mini  | `openai/gpt-4o-mini`  |
+| Model | ID |
+|---|---|
+| GPT-5.2 | `openai/gpt-5.2` |
+| GPT-4o | `openai/gpt-4o` |
+| GPT-4o Mini | `openai/gpt-4o-mini` |
 
 **Google Gemini:**
+| Model | ID |
+|---|---|
+| Gemini 2.5 Pro | `google/gemini-2.5-pro` |
+| Gemini 2.5 Flash | `google/gemini-2.5-flash` |
 
-| Model             | ID                      |
-|-------------------|------------------------|
-| Gemini 2.5 Pro    | `google/gemini-2.5-pro`|
-| Gemini 2.5 Flash  | `google/gemini-2.5-flash`|
-
-### Change Model via API
+### Đổi model qua API
 
 ```bash
 curl -X PUT \
@@ -56,18 +53,18 @@ curl -X PUT \
   http://$VPS_IP:9998/api/config/provider
 ```
 
-> **Note:** When switching providers, the corresponding API key must be set. For example, switching to `openai` requires an OpenAI API key.
+> **Lưu ý:** Khi đổi provider, cần có API key tương ứng. Ví dụ đổi sang `openai` thì cần có OpenAI API key.
 
 ---
 
-## 2. Manage API Keys
+## 2. Quản lý API Keys
 
-### API Key Reading Priority
+### Thứ tự ưu tiên đọc API key
 
-1. **auth-profiles.json** (highest priority)
-2. **Environment variables** in `.env` (fallback)
+1. **auth-profiles.json** (ưu tiên cao nhất)
+2. **Biến môi trường** trong `.env` (fallback)
 
-### Update API Key via API
+### Cập nhật API key qua API
 
 ```bash
 curl -X PUT \
@@ -77,9 +74,9 @@ curl -X PUT \
   http://$VPS_IP:9998/api/config/api-key
 ```
 
-The API automatically saves the key to both `auth-profiles.json` and `.env`, then restarts OpenClaw.
+API sẽ tự động lưu key vào cả `auth-profiles.json` và `.env`, sau đó restart OpenClaw.
 
-### Check API Key Validity
+### Kiểm tra API key hợp lệ
 
 ```bash
 curl -X POST \
@@ -89,19 +86,19 @@ curl -X POST \
   http://$VPS_IP:9998/api/config/test-key
 ```
 
-Results:
-- `{"ok": true}` — Key is valid
-- `{"ok": false, "error": "API key invalid or expired"}` — Key is invalid
+Kết quả:
+- `{"ok": true}` — Key hợp lệ
+- `{"ok": false, "error": "API key invalid or expired"}` — Key không hợp lệ
 
-### Provider Mapping
+### Provider mapping
 
-| Provider      | Environment Variable     | Profile Provider |
-|---------------|-------------------------|------------------|
-| `anthropic`   | `ANTHROPIC_API_KEY`     | `anthropic`      |
-| `openai`      | `OPENAI_API_KEY`        | `openai`         |
-| `gemini`      | `GEMINI_API_KEY`        | `google`         |
+| Provider | Biến môi trường | Profile provider |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | `anthropic` |
+| `openai` | `OPENAI_API_KEY` | `openai` |
+| `gemini` | `GEMINI_API_KEY` | `google` |
 
-### auth-profiles.json Format
+### Format auth-profiles.json
 
 File: `/opt/openclaw/config/agents/main/agent/auth-profiles.json`
 
@@ -122,16 +119,16 @@ File: `/opt/openclaw/config/agents/main/agent/auth-profiles.json`
 }
 ```
 
-> **Important:**
-> - `type` must be `"api_key"` (underscore, NOT `"api-key"`)
-> - Key field is `"key"` (NOT `"apiKey"`)
-> - Gemini's provider in profiles is `"google"` (NOT `"gemini"`)
+> **Quan trọng:**
+> - `type` phải là `"api_key"` (gạch dưới, KHÔNG phải `"api-key"`)
+> - Trường chứa key là `"key"` (KHÔNG phải `"apiKey"`)
+> - Provider của Gemini trong profiles là `"google"` (KHÔNG phải `"gemini"`)
 
 ---
 
-## 3. Gateway Configuration
+## 3. Cấu hình Gateway
 
-Config file: `/opt/openclaw/config/openclaw.json`
+File cấu hình: `/opt/openclaw/config/openclaw.json`
 
 ```json
 {
@@ -141,27 +138,29 @@ Config file: `/opt/openclaw/config/openclaw.json`
     "auth": {
       "token": "<gateway-token>"
     },
-    "trustedProxies": ["172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
+    "trustedProxies": ["127.0.0.1/32", "10.0.0.0/8", "192.168.0.0/16"],
     "controlUi": {
       "enabled": true,
-      "allowInsecureAuth": true
+      "dangerouslyAllowHostHeaderOriginFallback": true
     }
   }
 }
 ```
 
-| Parameter                | Description                          | Default Value           |
-|--------------------------|--------------------------------------|------------------------|
-| `mode`                   | Gateway mode                         | `"local"`              |
-| `bind`                   | Interface binding                    | `"lan"`                |
-| `auth.token`             | Dashboard authentication token        | Auto-generated (64-char hex) |
-| `trustedProxies`         | Trusted IP ranges (Caddy proxy)      | Docker + private nets  |
-| `controlUi.enabled`      | Enable/disable web UI                | `true`                 |
-| `controlUi.allowInsecureAuth` | Bypass device pairing           | `true`                 |
+| Tham số | Mô tả | Giá trị mặc định |
+|---|---|---|
+| `mode` | Chế độ gateway | `"local"` |
+| `bind` | Interface binding | `"lan"` |
+| `auth.token` | Token xác thực | Sinh tự động (64-char hex) |
+| `trustedProxies` | Dải IP được tin cậy (Caddy proxy) | Localhost + private networks |
+| `controlUi.enabled` | Bật/tắt giao diện web | `true` |
+| `controlUi.dangerouslyAllowHostHeaderOriginFallback` | Cho phép origin theo Host header (truy cập bằng IP/domain qua Caddy) | `true` |
+
+> OpenClaw >= 2026.9 đã bỏ `controlUi.allowInsecureAuth` và `controlUi.dangerouslyDisableDeviceAuth` — còn trong config là gateway báo "Unrecognized key" và không khởi động (exit 78). Control UI qua HTTP vẫn ghép cặp thiết bị bình thường (Management API tự approve qua `/pair`). Sửa config cũ: `HOME=/opt/openclaw openclaw doctor --fix --yes --non-interactive && systemctl restart openclaw`.
 
 ---
 
-## 4. Browser Configuration
+## 4. Cấu hình Browser
 
 ```json
 {
@@ -173,15 +172,15 @@ Config file: `/opt/openclaw/config/openclaw.json`
 }
 ```
 
-| Parameter         | Description                                 | Default Value     |
-|-------------------|---------------------------------------------|------------------|
-| `headless`        | Headless mode (no UI)                       | `true`           |
-| `defaultProfile`  | Name of browser profile                     | `"openclaw"`     |
-| `noSandbox`       | Disable sandbox (required for Docker)        | `true`           |
+| Tham số | Mô tả | Giá trị mặc định |
+|---|---|---|
+| `headless` | Chế độ headless (không UI) | `true` |
+| `defaultProfile` | Tên browser profile | `"openclaw"` |
+| `noSandbox` | Tắt sandbox (cần cho bare-metal) | `true` |
 
 ---
 
-## 5. .env File — Environment Variables
+## 5. File .env — Biến môi trường
 
 File: `/opt/openclaw/.env`
 
@@ -193,30 +192,30 @@ OPENCLAW_VERSION=latest
 OPENCLAW_GATEWAY_PORT=18789
 OPENCLAW_GATEWAY_TOKEN=<gateway-token>
 
-# Management API (generated by my.hitechcloud.vn — DO NOT DELETE/EDIT)
+# Management API (do my.hitechcloud.vn sinh ra — KHÔNG ĐƯỢC XÓA/SỬA)
 OPENCLAW_MGMT_API_KEY=<mgmt-api-key>
 
-# AI Provider API Keys (uncomment and fill)
+# AI Provider API Keys (bỏ comment và điền)
 # ANTHROPIC_API_KEY=sk-ant-xxx
 # OPENAI_API_KEY=sk-xxx
 # GEMINI_API_KEY=AIzaSy...
 
-# Messaging Channels (uncomment and fill)
+# Messaging Channels (bỏ comment và điền)
 # TELEGRAM_BOT_TOKEN=123456789:ABCdef...
 # DISCORD_BOT_TOKEN=xxx
 # SLACK_BOT_TOKEN=xoxb-xxx
 # ZALO_BOT_TOKEN=xxx
 ```
 
-### Manage env via API
+### Quản lý env qua API
 
-**View all variables** (sensitive values are masked):
+**Xem tất cả biến** (giá trị nhạy cảm được ẩn):
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/env
 ```
 
-**Add/update a variable:**
+**Thêm/sửa biến:**
 
 ```bash
 curl -X PUT \
@@ -226,7 +225,7 @@ curl -X PUT \
   http://$VPS_IP:9998/api/env/CUSTOM_VAR
 ```
 
-**Delete a variable:**
+**Xóa biến:**
 
 ```bash
 curl -X DELETE \
@@ -234,17 +233,17 @@ curl -X DELETE \
   http://$VPS_IP:9998/api/env/CUSTOM_VAR
 ```
 
-> **Protected variables** (cannot be deleted): `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_MGMT_API_KEY`, `OPENCLAW_VERSION`, `OPENCLAW_GATEWAY_PORT`
+> **Biến được bảo vệ** (không thể xóa): `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_MGMT_API_KEY`, `OPENCLAW_VERSION`, `OPENCLAW_GATEWAY_PORT`
 
 ---
 
-## 6. View Current Configuration
+## 6. Xem cấu hình hiện tại
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/config
 ```
 
-Returns full configuration, including:
-- Current provider and model
-- API keys (masked)
-- Configuration of channels, gateway, browser, plugins
+Trả về cấu hình đầy đủ bao gồm:
+- Provider và model đang dùng
+- API keys (đã ẩn bớt)
+- Cấu hình channels, gateway, browser, plugins

@@ -1,43 +1,43 @@
-# Messaging Channels Connection
+# Kết nối kênh nhắn tin
 
-## Table of Contents
+## Mục lục
 
-- [Overview](#overview)
+- [Tổng quan](#tổng-quan)
 - [1. Telegram Bot](#1-telegram-bot)
 - [2. Discord Bot](#2-discord-bot)
 - [3. Zalo OA](#3-zalo-oa)
 - [4. Slack Bot](#4-slack-bot)
-- [5. View Channel Status](#5-view-channel-status)
-- [6. Remove a Channel](#6-remove-a-channel)
+- [5. Xem trạng thái các kênh](#5-xem-trạng-thái-các-kênh)
+- [6. Xóa kênh](#6-xóa-kênh)
 
 ---
 
-## Overview
+## Tổng quan
 
-OpenClaw supports integration with 4 messaging platforms:
+OpenClaw hỗ trợ kết nối với 4 nền tảng nhắn tin:
 
-| Channel   | Environment Variable     | Status           |
-|-----------|-------------------------|------------------|
-| Telegram  | `TELEGRAM_BOT_TOKEN`    | Built-in         |
-| Discord   | `DISCORD_BOT_TOKEN`     | Via plugin       |
-| Zalo OA   | `ZALO_BOT_TOKEN`        | Via plugin       |
-| Slack     | `SLACK_BOT_TOKEN`       | Via plugin       |
+| Kênh | Biến môi trường | Trạng thái |
+|---|---|---|
+| Telegram | `TELEGRAM_BOT_TOKEN` | Tích hợp sẵn |
+| Discord | `DISCORD_BOT_TOKEN` | Qua plugin |
+| Zalo OA | `ZALO_BOT_TOKEN` | Qua plugin |
+| Slack | `SLACK_BOT_TOKEN` | Qua plugin |
 
-After connecting, users can chat with AI directly on these platforms.
+Sau khi kết nối, người dùng có thể chat với AI trực tiếp qua các nền tảng này.
 
 ---
 
 ## 1. Telegram Bot
 
-### Step 1: Create a Bot on Telegram
+### Bước 1: Tạo Bot trên Telegram
 
-1. Open Telegram, search for **@BotFather**
-2. Send the command `/newbot`
-3. Name your bot (e.g., `My OpenClaw Bot`)
-4. Set a username for your bot (e.g., `my_openclaw_bot`)
-5. BotFather will return a **Bot Token** like: `123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`
+1. Mở Telegram, tìm **@BotFather**
+2. Gửi lệnh `/newbot`
+3. Đặt tên cho bot (ví dụ: `My OpenClaw Bot`)
+4. Đặt username cho bot (ví dụ: `my_openclaw_bot`)
+5. BotFather sẽ trả về **Bot Token** dạng: `123456789:ABCdefGHIjklMNOpqrSTUvwxYZ`
 
-### Step 2: Connect the Bot to OpenClaw
+### Bước 2: Kết nối Bot với OpenClaw
 
 ```bash
 curl -X PUT \
@@ -47,11 +47,11 @@ curl -X PUT \
   http://$VPS_IP:9998/api/channels/telegram
 ```
 
-### Step 3: Verify
+### Bước 3: Kiểm tra
 
-Open Telegram, find your new bot, and send a message. The bot will reply with AI.
+Mở Telegram, tìm bot vừa tạo và gửi tin nhắn. Bot sẽ trả lời bằng AI.
 
-### Advanced Options
+### Tùy chọn nâng cao
 
 ```bash
 curl -X PUT \
@@ -65,33 +65,33 @@ curl -X PUT \
   http://$VPS_IP:9998/api/channels/telegram
 ```
 
-| Parameter    | Description                          | Default  |
-|--------------|--------------------------------------|----------|
-| `dmPolicy`   | Direct message policy: `"open"` (anyone can message) | `"open"` |
-| `allowFrom`  | List of allowed users/groups: `["*"]` = everyone     | `["*"]`  |
+| Tham số | Mô tả | Mặc định |
+|---|---|---|
+| `dmPolicy` | Chính sách nhắn tin riêng: `"open"` (ai cũng nhắn được) | `"open"` |
+| `allowFrom` | Danh sách user/group được phép: `["*"]` = tất cả | `["*"]` |
 
 ---
 
 ## 2. Discord Bot
 
-### Step 1: Create a Bot in Discord Developer Portal
+### Bước 1: Tạo Bot trên Discord Developer Portal
 
-1. Go to https://discord.com/developers/applications
-2. Click **"New Application"** → name it → **"Create"**
-3. Go to the **"Bot"** tab → **"Add Bot"**
-4. Click **"Reset Token"** to get a Bot Token
-5. Enable **Privileged Gateway Intents**:
+1. Truy cập https://discord.com/developers/applications
+2. Bấm **"New Application"** → đặt tên → **"Create"**
+3. Vào tab **"Bot"** → bấm **"Add Bot"**
+4. Bấm **"Reset Token"** để lấy Bot Token
+5. Bật các **Privileged Gateway Intents**:
    - `MESSAGE CONTENT INTENT`
    - `SERVER MEMBERS INTENT`
 
-### Step 2: Invite the Bot to Your Server
+### Bước 2: Mời Bot vào Server
 
-1. Go to the **"OAuth2"** tab → **"URL Generator"**
-2. Select the `bot` scope
-3. Select permissions: `Send Messages`, `Read Message History`, `Read Messages/View Channels`
-4. Copy the URL and open it in your browser to invite the bot
+1. Vào tab **"OAuth2"** → **"URL Generator"**
+2. Chọn scope: `bot`
+3. Chọn permissions: `Send Messages`, `Read Message History`, `Read Messages/View Channels`
+4. Copy URL và mở trong trình duyệt để mời bot vào server
 
-### Step 3: Connect the Bot to OpenClaw
+### Bước 3: Kết nối Bot với OpenClaw
 
 ```bash
 curl -X PUT \
@@ -101,19 +101,19 @@ curl -X PUT \
   http://$VPS_IP:9998/api/channels/discord
 ```
 
-> The Discord plugin will be automatically enabled when connected.
+> Discord plugin sẽ được tự động bật khi kết nối.
 
 ---
 
 ## 3. Zalo OA
 
-### Step 1: Create a Zalo OA
+### Bước 1: Tạo Zalo OA
 
-1. Go to https://oa.zalo.me
-2. Create an Official Account (or use an existing OA)
-3. In the **"Management"** section → **"API"** to get the token
+1. Truy cập https://oa.zalo.me
+2. Tạo Official Account (hoặc dùng OA có sẵn)
+3. Vào phần **"Quản lý"** → **"API"** để lấy token
 
-### Step 2: Connect to OpenClaw
+### Bước 2: Kết nối với OpenClaw
 
 ```bash
 curl -X PUT \
@@ -123,31 +123,31 @@ curl -X PUT \
   http://$VPS_IP:9998/api/channels/zalo
 ```
 
-> The Zalo plugin will be automatically enabled when connected.
+> Zalo plugin sẽ được tự động bật khi kết nối.
 
 ---
 
 ## 4. Slack Bot
 
-### Step 1: Create a Slack App
+### Bước 1: Tạo Slack App
 
-1. Go to https://api.slack.com/apps
-2. Click **"Create New App"** → **"From scratch"**
-3. Name it and select your workspace
+1. Truy cập https://api.slack.com/apps
+2. Bấm **"Create New App"** → **"From scratch"**
+3. Đặt tên và chọn workspace
 
-### Step 2: Configure the Bot
+### Bước 2: Cấu hình Bot
 
-1. In **"OAuth & Permissions"**, add Bot Token Scopes:
+1. Vào **"OAuth & Permissions"** → thêm Bot Token Scopes:
    - `chat:write`
    - `channels:read`
    - `channels:history`
    - `im:read`
    - `im:history`
    - `im:write`
-2. Click **"Install to Workspace"** → copy the **Bot User OAuth Token** (`xoxb-...`)
-3. In **"Socket Mode"**, enable Socket Mode → create an **App-Level Token** (`xapp-...`)
+2. Bấm **"Install to Workspace"** → copy **Bot User OAuth Token** (`xoxb-...`)
+3. Vào **"Socket Mode"** → bật Socket Mode → tạo **App-Level Token** (`xapp-...`)
 
-### Step 3: Connect to OpenClaw
+### Bước 3: Kết nối với OpenClaw
 
 ```bash
 curl -X PUT \
@@ -160,17 +160,17 @@ curl -X PUT \
   http://$VPS_IP:9998/api/channels/slack
 ```
 
-> **Note:** Slack requires both `token` (Bot Token) and `appToken` (App-Level Token).
+> **Lưu ý:** Slack cần cả `token` (Bot Token) và `appToken` (App-Level Token).
 
 ---
 
-## 5. View Channel Status
+## 5. Xem trạng thái các kênh
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/channels
 ```
 
-Sample result:
+Kết quả mẫu:
 
 ```json
 {
@@ -200,13 +200,13 @@ Sample result:
 }
 ```
 
-- `configured: true` — Token set AND enabled
-- `enabled: true` — Enabled in config
-- `token` — Displays first 8 + last 4 chars (middle hidden)
+- `configured: true` — Đã có token VÀ đang bật
+- `enabled: true` — Đang bật trong cấu hình
+- `token` — Hiển thị 8 ký tự đầu + 4 ký tự cuối (ẩn phần giữa)
 
 ---
 
-## 6. Remove a Channel
+## 6. Xóa kênh
 
 ```bash
 curl -X DELETE \
@@ -214,7 +214,7 @@ curl -X DELETE \
   http://$VPS_IP:9998/api/channels/telegram
 ```
 
-Result:
+Kết quả:
 
 ```json
 {
@@ -224,7 +224,7 @@ Result:
 }
 ```
 
-The API will automatically:
-- Remove the token from `.env` and config
-- Disable the plugin (if any)
+API sẽ tự động:
+- Xóa token khỏi `.env` và cấu hình
+- Tắt plugin (nếu có)
 - Restart OpenClaw

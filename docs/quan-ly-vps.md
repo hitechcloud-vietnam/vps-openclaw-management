@@ -1,38 +1,34 @@
-# VPS & Docker Management
+# Quản lý VPS
 
-## Table of Contents
+## Mục lục
 
-- [1. Common Docker Commands](#1-common-docker-commands)
-- [2. Domain + SSL Configuration](#2-domain--ssl-configuration)
-- [3. Upgrade Version](#3-upgrade-version)
-- [4. View System Information](#4-view-system-information)
-- [5. Reset to Default](#5-reset-to-default)
+- [1. Lệnh quản lý thường dùng](#1-lệnh-quản-lý-thường-dùng)
+- [2. Cấu hình Domain + SSL](#2-cấu-hình-domain--ssl)
+- [3. Nâng cấp phiên bản](#3-nâng-cấp-phiên-bản)
+- [4. Xem thông tin hệ thống](#4-xem-thông-tin-hệ-thống)
+- [5. Reset về mặc định](#5-reset-về-mặc-định)
 - [6. Troubleshooting](#6-troubleshooting)
 
 ---
 
-## 1. Common Docker Commands
+## 1. Lệnh quản lý thường dùng
 
-SSH into your VPS and run the following commands:
+SSH vào VPS và chạy các lệnh sau:
 
-```bash
-cd /opt/openclaw
-```
-
-### View logs
+### Xem logs
 
 ```bash
-# View OpenClaw logs (follow mode)
-docker compose logs -f openclaw
+# Xem logs OpenClaw (follow mode)
+journalctl -u openclaw -f
 
-# View Caddy logs (reverse proxy)
-docker compose logs -f caddy
+# Xem logs Caddy (reverse proxy)
+journalctl -u caddy -f
 
-# View last 200 lines
-docker compose logs --tail=200 openclaw
+# Xem 200 dòng cuối
+journalctl -u openclaw --no-pager -n 200
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" \
@@ -42,10 +38,10 @@ curl -H "Authorization: Bearer $MGMT_KEY" \
 ### Restart
 
 ```bash
-docker compose restart openclaw
+systemctl restart openclaw
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
@@ -55,55 +51,55 @@ curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
 ### Stop / Start
 
 ```bash
-# Stop
-docker compose stop openclaw
+# Dừng
+systemctl stop openclaw
 
-# Start/Resume
-docker compose start openclaw
+# Khởi động lại
+systemctl start openclaw
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
-# Stop
+# Dừng
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/stop
 
-# Start
+# Khởi động
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/start
 ```
 
-### Rebuild (recreate containers)
+### Rebuild (restart lại services)
 
 ```bash
-docker compose down && docker compose up -d
+systemctl restart openclaw && systemctl restart caddy
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/rebuild
 ```
 
-### Check status
+### Xem trạng thái
 
 ```bash
-docker compose ps
+systemctl status openclaw caddy openclaw-mgmt
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/status
 ```
 
-### Run CLI command in container
+### Chạy lệnh CLI
 
 ```bash
-docker compose exec openclaw node dist/index.js models scan
-docker compose exec openclaw node dist/index.js config get
+HOME=/opt/openclaw openclaw models scan
+HOME=/opt/openclaw openclaw config get
 ```
 
-Or via API:
+Hoặc qua API:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
@@ -114,17 +110,17 @@ curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
 
 ---
 
-## 2. Domain + SSL Configuration
+## 2. Cấu hình Domain + SSL
 
-### View current domain
+### Xem domain hiện tại
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/domain
 ```
 
-### Change domain (auto configure Let's Encrypt SSL)
+### Đổi domain (tự động cấu hình SSL Let's Encrypt)
 
-**Requirement:** The domain's DNS (A record) must already point to the VPS IP.
+**Yêu cầu:** Domain đã trỏ DNS (A record) về IP của VPS.
 
 ```bash
 curl -X PUT \
@@ -134,7 +130,7 @@ curl -X PUT \
   http://$VPS_IP:9998/api/domain
 ```
 
-Optional: add email for Let's Encrypt:
+Tùy chọn thêm email cho Let's Encrypt:
 
 ```bash
 curl -X PUT \
@@ -144,16 +140,16 @@ curl -X PUT \
   http://$VPS_IP:9998/api/domain
 ```
 
-> **Note:**
-> - Domain must be lowercase, no `https://`
-> - DNS must resolve to the correct VPS IP, else API will error
-> - If Caddy cannot start with the new domain, the system will automatically roll back to IP configuration
+> **Lưu ý:**
+> - Domain phải viết thường, không có `https://`
+> - DNS phải đã resolve đúng IP của VPS, nếu không API sẽ báo lỗi
+> - Nếu Caddy không khởi động được với domain mới, hệ thống tự động rollback về cấu hình IP
 
-### Manual configuration on VPS
+### Cấu hình thủ công trên VPS
 
-Edit `/opt/openclaw/Caddyfile`:
+Sửa file `/opt/openclaw/Caddyfile`:
 
-**For domain:**
+**Với domain:**
 ```
 openclaw.example.com {
     tls {
@@ -161,44 +157,43 @@ openclaw.example.com {
             dir https://acme-v02.api.letsencrypt.org/directory
         }
     }
-    reverse_proxy openclaw:18789
+    reverse_proxy 127.0.0.1:18789
 }
 ```
 
-**For IP (self-signed):**
+**Với IP (self-signed):**
 ```
 180.93.138.155 {
     tls internal
-    reverse_proxy openclaw:18789
+    reverse_proxy 127.0.0.1:18789
 }
 ```
 
-After editing, restart Caddy:
+Sau khi sửa, restart Caddy:
 
 ```bash
-docker compose restart caddy
+systemctl restart caddy
 ```
 
 ---
 
-## 3. Upgrade Version
+## 3. Nâng cấp phiên bản
 
-### Via SSH
+### Qua SSH
 
 ```bash
-cd /opt/openclaw
-docker compose pull && docker compose up -d
+npm update -g openclaw@latest && systemctl restart openclaw
 ```
 
-### Via API
+### Qua API
 
 ```bash
 curl -X POST -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/upgrade
 ```
 
-> The API returns immediately with `202 Accepted`, the image pull runs in the background. Check status with `/api/status`.
+> API trả về ngay `202 Accepted`, quá trình cập nhật chạy ngầm. Kiểm tra trạng thái bằng `/api/status`.
 
-### View current version
+### Xem version hiện tại
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/version
@@ -206,13 +201,13 @@ curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/version
 
 ---
 
-## 4. View System Information
+## 4. Xem thông tin hệ thống
 
 ```bash
 curl -H "Authorization: Bearer $MGMT_KEY" http://$VPS_IP:9998/api/system
 ```
 
-Sample response:
+Kết quả mẫu:
 
 ```json
 {
@@ -233,16 +228,16 @@ Sample response:
     "available": "65G",
     "usagePercent": "19%"
   },
-  "nodeVersion": "v22.0.0",
-  "dockerVersion": "Docker version 27.0.0"
+  "nodeVersion": "v24.0.0",
+  "openclawVersion": "1.0.0"
 }
 ```
 
 ---
 
-## 5. Reset to Default
+## 5. Reset về mặc định
 
-> **WARNING:** This operation will **DELETE ALL data** and configuration, returning to initial state.
+> **CẢNH BÁO:** Thao tác này sẽ **XÓA TẤT CẢ dữ liệu** và cấu hình, trả về trạng thái ban đầu.
 
 ```bash
 curl -X POST \
@@ -252,61 +247,61 @@ curl -X POST \
   http://$VPS_IP:9998/api/reset
 ```
 
-The system will:
-1. Stop all containers
-2. Delete data and volumes
-3. Restore default configuration (Anthropic)
-4. Restart
+Hệ thống sẽ:
+1. Dừng service OpenClaw
+2. Xóa dữ liệu (`data/`)
+3. Khôi phục cấu hình mặc định (Anthropic)
+4. Khởi động lại service
 
-> You must send `{"confirm": "RESET"}` to confirm. Otherwise, it will error.
+> Phải gửi `{"confirm": "RESET"}` để xác nhận. Nếu không sẽ báo lỗi.
 
 ---
 
 ## 6. Troubleshooting
 
-### OpenClaw does not start
+### OpenClaw không khởi động
 
 ```bash
-# Check status
-docker compose ps
+# Kiểm tra trạng thái
+systemctl status openclaw caddy openclaw-mgmt
 
-# View error logs
-docker compose logs --tail=50 openclaw
+# Xem logs lỗi
+journalctl -u openclaw --no-pager -n 50
 
-# Try restarting
-docker compose restart openclaw
+# Thử restart
+systemctl restart openclaw
 
-# If still broken, rebuild
-docker compose down && docker compose up -d
+# Nếu vẫn lỗi, rebuild
+systemctl restart openclaw && systemctl restart caddy
 ```
 
-### Cannot access Dashboard
+### Không truy cập được Dashboard
 
-1. **Check container is running:**
+1. **Kiểm tra service đang chạy:**
    ```bash
-   docker compose ps
+   systemctl status openclaw caddy openclaw-mgmt
    ```
 
-2. **Check firewall:**
+2. **Kiểm tra firewall:**
    ```bash
    ufw status
-   # Ports 80 and 443 must be allowed
+   # Port 80 và 443 phải được allow
    ```
 
-3. **Check Caddy:**
+3. **Kiểm tra Caddy:**
    ```bash
-   docker compose logs caddy
+   journalctl -u caddy
    ```
 
-4. **Check DNS** (if using domain):
+4. **Kiểm tra DNS** (nếu dùng domain):
    ```bash
    dig openclaw.example.com
-   # Should return VPS IP
+   # Phải trả về IP của VPS
    ```
 
-### API key does not work
+### API key không hoạt động
 
-1. **Check key validity:**
+1. **Kiểm tra key hợp lệ:**
    ```bash
    curl -X POST -H "Authorization: Bearer $MGMT_KEY" \
      -H "Content-Type: application/json" \
@@ -314,12 +309,12 @@ docker compose down && docker compose up -d
      http://$VPS_IP:9998/api/config/test-key
    ```
 
-2. **Check auth-profiles.json:**
+2. **Kiểm tra auth-profiles.json:**
    ```bash
    cat /opt/openclaw/config/agents/main/agent/auth-profiles.json
    ```
 
-3. **Update the key:**
+3. **Cập nhật lại key:**
    ```bash
    curl -X PUT -H "Authorization: Bearer $MGMT_KEY" \
      -H "Content-Type: application/json" \
@@ -327,20 +322,20 @@ docker compose down && docker compose up -d
      http://$VPS_IP:9998/api/config/api-key
    ```
 
-### SSL not working
+### SSL không hoạt động
 
-1. **Check DNS points correctly:**
+1. **Kiểm tra DNS đã trỏ đúng:**
    ```bash
    dig +short your-domain.com
-   # Should return VPS IP
+   # Phải trả về IP của VPS
    ```
 
-2. **Check Caddy logs:**
+2. **Kiểm tra Caddy logs:**
    ```bash
-   docker compose logs caddy | grep -i "tls\|acme\|certificate"
+   journalctl -u caddy | grep -i "tls\|acme\|certificate"
    ```
 
-3. **Try changing domain again:**
+3. **Thử đổi domain lại:**
    ```bash
    curl -X PUT -H "Authorization: Bearer $MGMT_KEY" \
      -H "Content-Type: application/json" \
@@ -348,26 +343,26 @@ docker compose down && docker compose up -d
      http://$VPS_IP:9998/api/domain
    ```
 
-### Management API is unresponsive
+### Management API không phản hồi
 
 ```bash
-# Check service
+# Kiểm tra service
 systemctl status openclaw-mgmt
 
 # Restart service
 systemctl restart openclaw-mgmt
 
-# View logs
+# Xem logs
 journalctl -u openclaw-mgmt -f
 ```
 
-### Important environment variables — Do not delete
+### Biến môi trường quan trọng — Không được xóa
 
-The following variables in `/opt/openclaw/.env` **MUST NOT BE DELETED** – if missing you will lose system access:
+Các biến sau trong `/opt/openclaw/.env` **KHÔNG ĐƯỢC XÓA**, nếu mất sẽ không truy cập được hệ thống:
 
-| Variable                | Description                                              |
-|-------------------------|---------------------------------------------------------|
-| `OPENCLAW_GATEWAY_TOKEN`| Dashboard access token                                  |
-| `OPENCLAW_MGMT_API_KEY` | API management key (issued by my.hitechcloud.vn; do not change) |
-| `OPENCLAW_VERSION`      | OpenClaw version                                        |
-| `OPENCLAW_GATEWAY_PORT` | Internal gateway port                                   |
+| Biến | Mô tả |
+|---|---|
+| `OPENCLAW_GATEWAY_TOKEN` | Token truy cập Dashboard |
+| `OPENCLAW_MGMT_API_KEY` | Key quản lý API (do my.hitechcloud.vn cấp, không tự đổi được) |
+| `OPENCLAW_VERSION` | Phiên bản OpenClaw |
+| `OPENCLAW_GATEWAY_PORT` | Port gateway nội bộ |

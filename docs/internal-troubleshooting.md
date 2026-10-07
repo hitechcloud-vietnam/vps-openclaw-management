@@ -1,191 +1,191 @@
-# Internal Documentation — Error Handling & Troubleshooting
+# Tài liệu nội bộ — Xử lý lỗi & Troubleshooting
 
-> Documentation for the hitechcloud.vn engineering team. Do not share with customers.
+> Tài liệu dành cho đội kỹ thuật my.hitechcloud.vn. Không chia sẻ với khách hàng.
 
-## Table of Contents
+## Mục lục
 
-- [1. Error Handling Architecture](#1-error-handling-architecture)
-- [2. HTTP Error Codes and Meanings](#2-http-error-codes-and-meanings)
-- [3. Timeout Values by Operation Type](#3-timeout-values-by-operation-type)
-- [4. Authentication Error Handling](#4-authentication-error-handling)
-- [5. Docker Error Handling](#5-docker-error-handling)
-- [6. File I/O Error Handling](#6-file-io-error-handling)
-- [7. DNS & Domain Error Handling](#7-dns--domain-error-handling)
-- [8. API Key Test Error Handling](#8-api-key-test-error-handling)
-- [9. Security — Shell Injection Prevention](#9-security--shell-injection-prevention)
-- [10. Protected Environment Variables](#10-protected-environment-variables)
-- [11. Common Errors and How to Fix](#11-common-errors-and-how-to-fix)
-- [12. Note on Race Condition](#12-note-on-race-condition)
-- [13. Debug Commands on VPS](#13-debug-commands-on-vps)
+- [1. Kiến trúc xử lý lỗi](#1-kiến-trúc-xử-lý-lỗi)
+- [2. Mã lỗi HTTP và ý nghĩa](#2-mã-lỗi-http-và-ý-nghĩa)
+- [3. Timeout cho từng loại thao tác](#3-timeout-cho-từng-loại-thao-tác)
+- [4. Xử lý lỗi Authentication](#4-xử-lý-lỗi-authentication)
+- [5. Xử lý lỗi Service](#5-xử-lý-lỗi-service)
+- [6. Xử lý lỗi file I/O](#6-xử-lý-lỗi-file-io)
+- [7. Xử lý lỗi DNS & Domain](#7-xử-lý-lỗi-dns--domain)
+- [8. Xử lý lỗi API Key Test](#8-xử-lý-lỗi-api-key-test)
+- [9. Bảo mật — Shell Injection Prevention](#9-bảo-mật--shell-injection-prevention)
+- [10. Biến môi trường được bảo vệ](#10-biến-môi-trường-được-bảo-vệ)
+- [11. Các lỗi thường gặp và cách xử lý](#11-các-lỗi-thường-gặp-và-cách-xử-lý)
+- [12. Lưu ý về race condition](#12-lưu-ý-về-race-condition)
+- [13. Lệnh debug trên VPS](#13-lệnh-debug-trên-vps)
 
 ---
 
-## 1. Error Handling Architecture
+## 1. Kiến trúc xử lý lỗi
 
-Management API (`server.js`) error handling flow:
+Management API (`server.js`) sử dụng mô hình xử lý lỗi:
 
 ```
 Request → Auth check → Rate limit check → Route handler → try/catch → Response
 ```
 
-- **Each route** is wrapped in `try-catch`. If any exception, returns `500` with `e.message`.
-- **Shell commands** use `execSync()` — throws on non-zero exit code or timeout.
-- **File operations** use `readFileSync()` / `writeFileSync()` — throws if file missing or write error.
+- **Mỗi route** đều được bọc trong `try-catch`. Nếu có exception, trả về `500` kèm `e.message`.
+- **Shell commands** dùng `execSync()` — tự throw khi exit code khác 0 hoặc timeout.
+- **File operations** dùng `readFileSync()` / `writeFileSync()` — throw khi file không tồn tại hoặc lỗi ghi.
 
-Unified error response format:
+Format response lỗi thống nhất:
 
 ```json
-{"ok": false, "error": "Error description"}
+{"ok": false, "error": "Mô tả lỗi"}
 ```
 
 ---
 
-## 2. HTTP Error Codes and Meanings
+## 2. Mã lỗi HTTP và ý nghĩa
 
-| HTTP Code | When does it occur                   | Action                              |
-|-----------|--------------------------------------|-------------------------------------|
-| `200`     | Success (sync)                       | —                                   |
-| `202`     | Success, processing in background    | Client should poll `/api/status`    |
-| `400`     | Invalid input data                   | Check request body                  |
-| `401`     | Missing/wrong Bearer token           | Check `OPENCLAW_MGMT_API_KEY` in `.env` |
-| `403`     | Tried to modify/delete protected var | That variable cannot be changed     |
-| `429`     | IP blocked (10+ auth failures)       | Wait 15 mins or restart mgmt service|
-| `500`     | Server error (shell timeout, file I/O, Docker fail) | See logs: `journalctl -u openclaw-mgmt` |
-
----
-
-## 3. Timeout Values by Operation Type
-
-| Operation                | Timeout   | Note                           |
-|--------------------------|-----------|--------------------------------|
-| Default shell command    | 30s       | `shell()` function             |
-| Docker compose (general) | 60s       | restart, stop, start           |
-| Docker compose down      | 60s       | Graceful shutdown              |
-| Docker compose up        | 120s      | Rebuild/start                  |
-| Docker pull + recreate   | 300s (5m) | `/api/upgrade` — runs in bg    |
-| Docker exec (CLI proxy)  | 60s       | `/api/cli`                     |
-| DNS lookup (dig/host)    | 10s       | Validate domain                |
-| API key test (curl)      | 15s       | Test provider endpoints        |
-| Caddy restart (domain)   | 30s       | After writing Caddyfile        |
-| Caddy rollback restart   | 15s       | When Caddy fails with new domain|
+| HTTP Code | Khi nào xảy ra | Hành động |
+|---|---|---|
+| `200` | Thành công (sync) | — |
+| `202` | Thành công, đang xử lý ngầm (upgrade) | Client poll `/api/status` |
+| `400` | Dữ liệu gửi lên không hợp lệ | Kiểm tra request body |
+| `401` | Thiếu/sai Bearer token | Kiểm tra `OPENCLAW_MGMT_API_KEY` trong `.env` |
+| `403` | Cố sửa/xóa biến được bảo vệ | Biến đó không cho phép thay đổi |
+| `429` | IP bị chặn (quá 10 lần auth sai) | Đợi 15 phút hoặc restart mgmt service |
+| `500` | Lỗi server (shell timeout, file I/O, service fail) | Xem logs: `journalctl -u openclaw-mgmt` |
 
 ---
 
-## 4. Authentication Error Handling
+## 3. Timeout cho từng loại thao tác
 
-### Mechanism
+| Thao tác | Timeout | Ghi chú |
+|---|---|---|
+| Shell command mặc định | 30s | Hàm `shell()` |
+| systemctl restart | 60s | restart, stop, start |
+| systemctl stop | 60s | Graceful shutdown |
+| systemctl start | 120s | Rebuild/start |
+| npm update + restart | 300s (5 phút) | `/api/upgrade` — chạy ngầm |
+| CLI proxy | 60s | `/api/cli` |
+| DNS lookup (dig/host) | 10s | Validate domain |
+| API key test (curl) | 15s | Test provider endpoints |
+| Caddy restart (domain change) | 30s | Sau khi ghi Caddyfile |
+| Caddy rollback restart | 15s | Khi Caddy fail với domain mới |
 
-- Bearer token checked with `crypto.timingSafeEqual()` — prevents timing attack.
-- API key read from `.env` on each request (no cache).
-- IP-based rate limit: **10 bad attempts → block for 15 mins**.
+---
 
-### Failure Modes
+## 4. Xử lý lỗi Authentication
 
-| Error                       | Cause                          | Response |
-|-----------------------------|-------------------------------|----------|
-| Missing `Authorization` hdr | Client did not send header     | 401      |
-| Bad format (no `Bearer `)   | Header fails `/^Bearer\s+(.+)$/` regex | 401      |
-| Wrong token value           | Key does not match `.env`      | 401 + fail count up |
-| Wrong token length          | `Buffer.from()` length mismatch| 401      |
-| `.env` missing mgmt key     | Key becomes empty              | 401 (always fails) |
-| IP blocked                  | 10+ failures                   | 429      |
+### Cơ chế
 
-### Notes
+- Bearer token so sánh bằng `crypto.timingSafeEqual()` — chống timing attack.
+- API key đọc từ `.env` mỗi request (không cache).
+- Rate limiting theo IP: **10 lần sai → chặn 15 phút**.
 
-- Rate limit is **in-memory** — restarting service resets block.
-- Cleanup runs only when a blocked IP accesses after 15 minutes.
-- **No persistent storage** for rate limiting — possible memory leak if under widespread attack.
+### Các failure modes
 
-### Unblock a blocked IP
+| Lỗi | Nguyên nhân | Response |
+|---|---|---|
+| Missing `Authorization` header | Client không gửi header | 401 |
+| Sai format (không có `Bearer `) | Header không match regex `/^Bearer\s+(.+)$/` | 401 |
+| Token sai giá trị | Key không khớp `.env` | 401 + tăng fail count |
+| Token sai độ dài | `Buffer.from()` length mismatch | 401 |
+| `.env` không có `OPENCLAW_MGMT_API_KEY` | Key trả về empty string | 401 (luôn fail) |
+| IP bị chặn | Quá 10 lần sai | 429 |
+
+### Lưu ý
+
+- Rate limit lưu **in-memory** — restart service sẽ reset.
+- Cleanup chỉ xảy ra khi IP bị chặn truy cập lại sau khi hết 15 phút.
+- **Không có persistent storage** cho rate limiting → memory leak nhẹ nếu nhiều IP khác nhau tấn công.
+
+### Khắc phục IP bị chặn
 
 ```bash
-# Easiest: restart management API
+# Cách nhanh nhất: restart management API
 systemctl restart openclaw-mgmt
 ```
 
 ---
 
-## 5. Docker Error Handling
+## 5. Xử lý lỗi Service
 
-### Container not found
+### Service not found
 
-- `docker inspect` throws exception → catch and return `status: "not_found"`.
-- This is not a 500, just a normal response.
+- `systemctl status` trả về inactive/not-found → catch trả về `status: "not_found"`.
+- Không phải lỗi 500, trả về bình thường trong response body.
 
 ### Restart fail
 
-- `docker compose restart openclaw` throws → handled at route level → 500.
-- Common causes: corrupt image, disk full, OOM.
+- `systemctl restart openclaw` throw → catch ở route level → 500.
+- Nguyên nhân thường: config lỗi, disk full, OOM.
 
-### Caddy rollback on domain failure
+### Caddy rollback khi domain fail
 
-Domain change process:
+Luồng xử lý khi đổi domain:
 
 ```
-1. Write new Caddyfile (domain + Let's Encrypt)
+1. Ghi Caddyfile mới (domain + Let's Encrypt)
 2. Restart Caddy (30s timeout)
 3. Sleep 3s
 4. Check Caddy status
    ├── running → 200 OK
    └── not running → ROLLBACK:
-       ├── Write Caddyfile with IP + tls internal
+       ├── Ghi Caddyfile IP + tls internal
        ├── Restart Caddy (15s timeout)
-       └── Return 500 "Caddy failed to start..."
+       └── Trả về 500 "Caddy failed to start..."
 ```
 
-**Limitation:** If rollback fails, the error is silently caught. Caddy remains stopped, needs manual fix.
+**Hạn chế:** Nếu rollback restart cũng fail → lỗi bị nuốt (silent catch). Caddy ở trạng thái stopped, cần xử lý thủ công.
 
 ### Rebuild fail
 
 ```
-docker compose down (60s) → docker compose up -d (120s)
+systemctl restart openclaw (60s) → systemctl restart caddy (60s)
 ```
 
-- If `down` times out → `up` is NOT called → container is in unknown state.
-- If `up` fails → container is `stopped`.
+- Nếu restart openclaw timeout → caddy KHÔNG được restart → service ở trạng thái không xác định.
+- Nếu restart caddy fail → caddy ở trạng thái stopped.
 
-### Post-restart/rebuild checking
+### Kiểm tra sau restart/rebuild
 
-API sleeps 2-3 seconds then checks status. If container not ready after sleep, returned status may be inaccurate. No retry loop.
+API sleep 2-3 giây rồi check status. Nếu service chưa ready sau sleep → status có thể chưa chính xác. Không có retry loop.
 
 ---
 
-## 6. File I/O Error Handling
+## 6. Xử lý lỗi file I/O
 
-### Important files
+### Các file quan trọng
 
-| File                                    | Consequence if corrupt/lost                  |
-|------------------------------------------|----------------------------------------------|
-| `/opt/openclaw/.env`                     | Auth fails (MGMT key lost), lost tokens      |
-| `/opt/openclaw/config/openclaw.json`     | 500 on all config endpoints                  |
-| `auth-profiles.json`                     | AI keys lost, but falls back to env vars     |
-| `/opt/openclaw/Caddyfile`                | Caddy fails, SSL lost                       |
-| `/etc/openclaw/config/*.json`            | Cannot change provider                       |
+| File | Hậu quả nếu corrupt/mất |
+|---|---|
+| `/opt/openclaw/.env` | Auth fail (không đọc được MGMT key), mất tokens |
+| `/opt/openclaw/config/openclaw.json` | 500 trên tất cả config endpoint |
+| `auth-profiles.json` | AI keys mất, nhưng fallback sang env vars |
+| `/opt/openclaw/Caddyfile` | Caddy không start, mất SSL |
+| `/etc/openclaw/config/*.json` | Không đổi được provider |
 
-### auth-profiles.json — Graceful fallback
-
-```javascript
-// If file missing or JSON error → return { profiles: {} }
-// DO NOT throw 500
-```
-
-### openclaw.json — NO graceful fallback
+### Auth-profiles.json — Graceful fallback
 
 ```javascript
-// JSON.parse() throws → 500 error
-// Manual fix or copy from template needed
+// Nếu file không tồn tại hoặc JSON lỗi → trả về { profiles: {} }
+// KHÔNG throw 500
 ```
 
-### Writes are NOT atomic
+### openclaw.json — KHÔNG có graceful fallback
 
-- `writeFileSync()` overwrites directly, no backup.
-- If the process crashes mid-write → file may be empty/corrupt.
-- **No file locking** — concurrent writes may corrupt file.
+```javascript
+// JSON.parse() throw → 500 error
+// Cần sửa thủ công hoặc copy từ template
+```
 
-### Recovering from corrupted config
+### Ghi file KHÔNG atomic
+
+- `writeFileSync()` ghi đè trực tiếp, không tạo backup.
+- Nếu process crash giữa chừng → file có thể bị trống hoặc corrupt.
+- **Không có file locking** — concurrent write có thể corrupt.
+
+### Khôi phục config corrupt
 
 ```bash
-# Copy default config template
+# Copy template config mặc định
 cp /etc/openclaw/config/anthropic.json /opt/openclaw/config/openclaw.json
 
 # Inject gateway token
@@ -195,78 +195,78 @@ jq --arg t "$TOKEN" '.gateway.auth.token = $t' \
   mv /tmp/oc.json /opt/openclaw/config/openclaw.json
 
 # Restart
-docker compose -f /opt/openclaw/docker-compose.yml restart openclaw
+systemctl restart openclaw
 ```
 
 ---
 
-## 7. DNS & Domain Error Handling
+## 7. Xử lý lỗi DNS & Domain
 
-### DNS validation flow
+### Luồng validate DNS
 
 ```
-1. Receive domain from request
-2. Lowercase + regex format validation
+1. Nhận domain từ request
+2. Lowercase + regex validate format
 3. dig +short A domain (10s timeout)
-   ├── Has result → filter IP format
-   └── No result → fallback:
+   ├── Có kết quả → filter IP format
+   └── Không có → fallback:
        host domain (10s timeout)
-       ├── "has address X.X.X.X" → parse IP
-       └── No → error
-4. Compare resolved IPs vs server IP
+       ├── Có "has address X.X.X.X" → parse IP
+       └── Không có → lỗi
+4. So sánh resolved IPs với server IP
    ├── Match → OK
    └── Mismatch → 400 error
 ```
 
-### DNS errors
+### Các lỗi DNS
 
-| Error                  | Message                                                          | Cause                  |
-|------------------------|------------------------------------------------------------------|------------------------|
-| Cannot resolve         | `"Cannot resolve DNS for {domain}. Point A record to {ip}."`     | DNS not set or not propagated |
-| IP mismatch            | `"DNS for {domain} resolves to {ips} — does not match server IP ({ip})."` | DNS points to wrong IP |
-| Bad domain format      | `"Invalid domain format"`                                        | Invalid chars, uppercase, trailing dot |
+| Lỗi | Message | Nguyên nhân |
+|---|---|---|
+| Không resolve được | `"Cannot resolve DNS for {domain}. Point A record to {ip}."` | DNS chưa trỏ hoặc chưa propagate |
+| IP không khớp | `"DNS for {domain} resolves to {ips} — does not match server IP ({ip})."` | DNS trỏ sai IP |
+| Format domain sai | `"Invalid domain format"` | Có ký tự đặc biệt, uppercase, trailing dot... |
 
-### Limitations
+### Hạn chế
 
-- **IPv4 only** (A record). Does not check AAAA (IPv6).
-- Both `dig` and `host` time out at 10s. If DNS slow → false negative.
-- DNS propagation may take up to 48h. Clients calling API too soon get rejected.
-
----
-
-## 8. API Key Test Error Handling
-
-### How each provider is tested
-
-| Provider   | Method         | URL                                       | Criteria   |
-|------------|---------------|--------------------------------------------|------------|
-| Anthropic  | POST `/v1/messages` | `api.anthropic.com`                   | HTTP 200   |
-| OpenAI     | GET `/v1/models`    | `api.openai.com`                      | HTTP 200   |
-| Gemini     | GET `/v1beta/models`| `generativelanguage.googleapis.com`    | HTTP 200   |
-
-### Failure Modes
-
-| Situation           | Provider HTTP code     | Test result         |
-|---------------------|-----------------------|---------------------|
-| Valid key           | 200                   | `ok: true`          |
-| Invalid/expired key | 401                   | `ok: false`         |
-| Quota exceeded      | 429                   | `ok: false`         |
-| Provider down       | 503                   | `ok: false`         |
-| Timeout (>15s)      | — (exception thrown)  | `ok: false`         |
-
-### Notes
-
-- Test endpoint does NOT save the key; simply checks and returns result.
-- API key has single quotes escaped before passing to curl: `'` → `'\''`.
-- Any non-200 provider response (including 201, 204) → considered fail.
+- **Chỉ hỗ trợ IPv4** (A record). Không check AAAA (IPv6).
+- Cả `dig` và `host` đều có 10s timeout. Nếu DNS server chậm → lỗi false negative.
+- DNS propagation có thể mất đến 48h. Client gọi API sớm quá sẽ bị reject.
 
 ---
 
-## 9. Security — Shell Injection Prevention
+## 8. Xử lý lỗi API Key Test
+
+### Cách test từng provider
+
+| Provider | Method | URL | Tiêu chí |
+|---|---|---|---|
+| Anthropic | POST `/v1/messages` | `api.anthropic.com` | HTTP 200 |
+| OpenAI | GET `/v1/models` | `api.openai.com` | HTTP 200 |
+| Gemini | GET `/v1beta/models` | `generativelanguage.googleapis.com` | HTTP 200 |
+
+### Failure modes
+
+| Tình huống | HTTP code từ provider | Kết quả test |
+|---|---|---|
+| Key hợp lệ | 200 | `ok: true` |
+| Key sai/hết hạn | 401 | `ok: false` |
+| Hết quota | 429 | `ok: false` |
+| Provider down | 503 | `ok: false` |
+| Timeout (>15s) | — | Exception → `ok: false` |
+
+### Lưu ý
+
+- Test endpoint KHÔNG lưu key. Chỉ kiểm tra rồi trả kết quả.
+- API key được escape single quotes trước khi đưa vào curl command: `'` → `'\''`.
+- Nếu provider API trả về code khác 200 (kể cả 201, 204) → vẫn coi là fail.
+
+---
+
+## 9. Bảo mật — Shell Injection Prevention
 
 ### CLI Proxy (`/api/cli`)
 
-**Blocked characters:** `;`, `&`, `|`, `` ` ``, `$`, `(`, `)`, `{`, `}`
+**Ký tự bị chặn:** `;`, `&`, `|`, `` ` ``, `$`, `(`, `)`, `{`, `}`
 
 ```javascript
 if (/[;&|`$(){}]/.test(command)) {
@@ -274,177 +274,176 @@ if (/[;&|`$(){}]/.test(command)) {
 }
 ```
 
-Command executed:
+Lệnh được thực thi:
 ```bash
-docker compose exec -T openclaw node dist/index.js <command>
+HOME=/opt/openclaw openclaw <command>
 ```
 
-### Known issues
+### Lỗ hổng đã biết
 
-- **Redirect `>`, `<`** are NOT blocked. Example: `models scan > /tmp/file` will still run.
-- However, command runs **inside container** (not host), so risk is limited.
+- **Redirect `>`, `<`** KHÔNG bị chặn. Ví dụ: `models scan > /tmp/file` vẫn chạy được.
+- Lệnh chạy trực tiếp trên host, cần lưu ý rủi ro bảo mật.
 
-### Other security points
+### Các điểm khác
 
-| Area                    | Security                                    |
-|-------------------------|---------------------------------------------|
-| Domain in dig/host      | Regex validated before placing in shell     |
-| API key in curl test    | Single quote escaping                       |
-| Docker commands         | Hardcoded, no user input                    |
-| Env var key             | Regex `/^[A-Z][A-Z0-9_]*$/`                 |
-
----
-
-## 10. Protected Environment Variables
-
-### Not allowed to modify via `PUT /api/env/:key`
-
-| Variable                 | Reason                                |
-|--------------------------|---------------------------------------|
-| `OPENCLAW_MGMT_API_KEY`  | Generated by HostBill/my.hitechcloud.vn; changing breaks panel-VPS link |
-
-→ Returns `403 Forbidden`.
-
-### Not allowed to delete via `DELETE /api/env/:key`
-
-| Variable                   | Reason                            |
-|----------------------------|-----------------------------------|
-| `OPENCLAW_GATEWAY_TOKEN`   | Lose dashboard access             |
-| `OPENCLAW_MGMT_API_KEY`    | Lose panel connection             |
-| `OPENCLAW_VERSION`         | Needed for Docker image tag       |
-| `OPENCLAW_GATEWAY_PORT`    | Needed for gateway binding        |
-
-→ Returns `403 Forbidden`.
+| Điểm | Bảo mật |
+|---|---|
+| Domain trong dig/host | Regex validate trước khi đưa vào shell |
+| API key trong curl test | Escape single quote |
+| systemctl commands | Hardcoded, không chứa user input |
+| Env var key | Regex `/^[A-Z][A-Z0-9_]*$/` |
 
 ---
 
-## 11. Common Errors and How to Fix
+## 10. Biến môi trường được bảo vệ
 
-### 11.1 — 429: IP blocked after many failed auth
+### Không cho sửa qua `PUT /api/env/:key`
 
-**Symptoms:** All API calls return 429.
+| Biến | Lý do |
+|---|---|
+| `OPENCLAW_MGMT_API_KEY` | Do HostBill/my.hitechcloud.vn sinh. Nếu sửa → panel mất kết nối VPS |
 
-**Cause:** Client sent wrong key >= 10 times.
+→ Trả về `403 Forbidden`.
 
-**Fix:**
+### Không cho xóa qua `DELETE /api/env/:key`
+
+| Biến | Lý do |
+|---|---|
+| `OPENCLAW_GATEWAY_TOKEN` | Mất → không truy cập Dashboard |
+| `OPENCLAW_MGMT_API_KEY` | Mất → panel mất kết nối |
+| `OPENCLAW_VERSION` | Cần cho phiên bản OpenClaw |
+| `OPENCLAW_GATEWAY_PORT` | Cần cho gateway binding |
+
+→ Trả về `403 Forbidden`.
+
+---
+
+## 11. Các lỗi thường gặp và cách xử lý
+
+### 11.1 — 429: IP bị chặn sau nhiều lần auth sai
+
+**Triệu chứng:** Tất cả API call trả về 429.
+
+**Nguyên nhân:** Client gửi sai key >= 10 lần.
+
+**Xử lý:**
 ```bash
-# Wait 15 mins, or:
+# Đợi 15 phút, hoặc:
 systemctl restart openclaw-mgmt
 ```
 
-### 11.2 — 401: Auth always fails even with correct key
+### 11.2 — 401: Auth luôn fail dù key đúng
 
-**Symptoms:** Correct key always gets 401.
+**Triệu chứng:** Key đúng nhưng luôn 401.
 
-**Cause:** `OPENCLAW_MGMT_API_KEY` in `.env` is empty or wrong.
+**Nguyên nhân:** `OPENCLAW_MGMT_API_KEY` trong `.env` bị trống hoặc sai.
 
-**Fix:**
+**Xử lý:**
 ```bash
-# Check the key
+# Kiểm tra key
 grep OPENCLAW_MGMT_API_KEY /opt/openclaw/.env
 
-# If empty, get key from HostBill and update it
-# (Contact HostBill admin for original key)
+# Nếu trống, lấy key từ HostBill và set lại
+# (Liên hệ HostBill admin để lấy key gốc)
 ```
 
 ### 11.3 — 500: Config JSON corrupt
 
-**Symptoms:** All config calls return 500.
+**Triệu chứng:** Mọi thao tác config trả về 500.
 
-**Check:**
+**Kiểm tra:**
 ```bash
 cat /opt/openclaw/config/openclaw.json | jq .
-# If jq reports parse error → file is corrupt
+# Nếu jq báo lỗi parse → file corrupt
 ```
 
-**Fix:**
+**Xử lý:**
 ```bash
 cp /etc/openclaw/config/anthropic.json /opt/openclaw/config/openclaw.json
 TOKEN=$(grep OPENCLAW_GATEWAY_TOKEN /opt/openclaw/.env | cut -d= -f2)
 jq --arg t "$TOKEN" '.gateway.auth.token = $t' \
   /opt/openclaw/config/openclaw.json > /tmp/oc.json && \
   mv /tmp/oc.json /opt/openclaw/config/openclaw.json
-docker compose -f /opt/openclaw/docker-compose.yml restart openclaw
+systemctl restart openclaw
 ```
 
-### 11.4 — Caddy won't start after domain change
+### 11.4 — Caddy không start sau đổi domain
 
-**Symptoms:** API returns 500 "Caddy failed to start". Dashboard is inaccessible.
+**Triệu chứng:** API trả 500 "Caddy failed to start". Dashboard không truy cập được.
 
-**Check:**
+**Kiểm tra:**
 ```bash
-docker compose -f /opt/openclaw/docker-compose.yml logs caddy
+journalctl -u caddy --no-pager -n 50
 cat /opt/openclaw/Caddyfile
 ```
 
-**Common causes:**
-- DNS hasn't propagated → Let's Encrypt challenge fails
-- Let's Encrypt rate limit (5 certs/domain/week)
-- Port 80/443 blocked by firewall
+**Nguyên nhân thường gặp:**
+- DNS chưa propagate → Let's Encrypt challenge fail
+- Rate limit Let's Encrypt (5 cert/domain/tuần)
+- Port 80/443 bị chặn bởi firewall khác
 
-**Fix:** API will auto-rollback config. If still error:
+**Xử lý:** API đã tự rollback về IP config. Nếu vẫn lỗi:
 ```bash
-# Manually reset Caddyfile
+# Reset Caddyfile thủ công
 IP=$(hostname -I | awk '{print $1}')
 cat > /opt/openclaw/Caddyfile << EOF
 ${IP} {
     tls internal
-    reverse_proxy openclaw:18789
+    reverse_proxy 127.0.0.1:18789
 }
 EOF
-docker compose -f /opt/openclaw/docker-compose.yml restart caddy
+systemctl restart caddy
 ```
 
-### 11.5 — Upgrade never completes
+### 11.5 — Upgrade không hoàn thành
 
-**Symptoms:** Call to `/api/upgrade` returns 202 but container does not update.
+**Triệu chứng:** Gọi `/api/upgrade` trả 202 nhưng service không cập nhật.
 
-**Check:**
+**Kiểm tra:**
 ```bash
 journalctl -u openclaw-mgmt --since "10 minutes ago" | grep -i upgrade
-docker compose -f /opt/openclaw/docker-compose.yml ps
+systemctl status openclaw caddy openclaw-mgmt
 ```
 
-**Manual fix:**
+**Xử lý thủ công:**
 ```bash
-cd /opt/openclaw
-docker compose pull openclaw
-docker compose up -d openclaw
+npm update -g openclaw@latest
+systemctl restart openclaw
 ```
 
-### 11.6 — Container in endless restart loop (crash loop)
+### 11.6 — Service restart liên tục (crash loop)
 
-**Symptoms:** Status is always `exited` or `restarting`.
+**Triệu chứng:** Status luôn `inactive` hoặc `activating`.
 
-**Check:**
+**Kiểm tra:**
 ```bash
-docker compose -f /opt/openclaw/docker-compose.yml logs --tail=50 openclaw
+journalctl -u openclaw --no-pager -n 50
 ```
 
-**Common causes:**
-- Config JSON format error
-- Invalid API key (model provider rejected)
+**Nguyên nhân thường gặp:**
+- Config JSON sai format
+- API key không hợp lệ (model provider reject)
 - Disk full
-- OOM (out of memory)
+- OOM (hết RAM)
 
-**Fix:**
+**Xử lý:**
 ```bash
-# Check disk
+# Kiểm tra disk
 df -h /
 
-# Check RAM
+# Kiểm tra RAM
 free -m
 
-# Reset config if needed
+# Reset config nếu cần
 cp /etc/openclaw/config/anthropic.json /opt/openclaw/config/openclaw.json
-docker compose -f /opt/openclaw/docker-compose.yml restart openclaw
+systemctl restart openclaw
 ```
 
-### 11.7 — Management API does not respond
+### 11.7 — Management API không phản hồi
 
-**Symptoms:** Cannot connect to port 9998.
+**Triệu chứng:** Không kết nối được port 9998.
 
-**Check:**
+**Kiểm tra:**
 ```bash
 systemctl status openclaw-mgmt
 journalctl -u openclaw-mgmt -f
@@ -452,27 +451,27 @@ ufw status | grep 9998
 ss -tlnp | grep 9998
 ```
 
-**Fix:**
+**Xử lý:**
 ```bash
 systemctl restart openclaw-mgmt
 
-# If still broken, check Node.js
+# Nếu vẫn lỗi, kiểm tra Node.js
 node --version
 cat /opt/openclaw-mgmt/server.js | head -5
 ```
 
-### 11.8 — auth-profiles.json missing/corrupt
+### 11.8 — auth-profiles.json mất/corrupt
 
-**Symptoms:** AI key missing, bot does not reply.
+**Triệu chứng:** AI key mất, bot không trả lời.
 
-**Note:** Corrupt auth-profiles.json does NOT cause 500 — system falls back to env vars.
+**Lưu ý:** auth-profiles.json corrupt KHÔNG gây 500 — hệ thống fallback sang env vars.
 
-**Check:**
+**Kiểm tra:**
 ```bash
 cat /opt/openclaw/config/agents/main/agent/auth-profiles.json | jq .
 ```
 
-**Fix:** Re-set key via API:
+**Xử lý:** Cập nhật key lại qua API:
 ```bash
 MGMT_KEY=$(grep OPENCLAW_MGMT_API_KEY /opt/openclaw/.env | cut -d= -f2)
 curl -X PUT -H "Authorization: Bearer $MGMT_KEY" \
@@ -483,41 +482,40 @@ curl -X PUT -H "Authorization: Bearer $MGMT_KEY" \
 
 ---
 
-## 12. Note on Race Condition
+## 12. Lưu ý về race condition
 
-Management API **has NO file locking**. All read-modify-write operations are non-atomic:
+Management API **KHÔNG có file locking**. Các thao tác đọc-sửa-ghi (read-modify-write) không atomic:
 
-| File           | Affected operations                                 |
-|----------------|-----------------------------------------------------|
-| `.env`         | `PUT /api/env`, `PUT /api/config/api-key`, `PUT /api/channels/:ch` |
-| `openclaw.json`| `PUT /api/config/provider`, `PUT /api/channels/:ch`, `DELETE /api/channels/:ch` |
+| File | Thao tác ảnh hưởng |
+|---|---|
+| `.env` | `PUT /api/env`, `PUT /api/config/api-key`, `PUT /api/channels/:ch` |
+| `openclaw.json` | `PUT /api/config/provider`, `PUT /api/channels/:ch`, `DELETE /api/channels/:ch` |
 | `auth-profiles.json` | `PUT /api/config/api-key`, `PUT /api/config/provider` |
 
-**Risk:** If 2 requests modify the same file at the same time, the later write overwrites the earlier one.
+**Rủi ro:** Nếu 2 request đồng thời sửa cùng file → request sau ghi đè request trước.
 
-**Mitigation:** HostBill panel should serialize API calls (do not call in parallel).
+**Giảm thiểu:** Panel HostBill nên serialize các API call (không gọi song song).
 
 ---
 
-## 13. Debug Commands on VPS
+## 13. Lệnh debug trên VPS
 
-### Quick health check of the whole system
+### Kiểm tra nhanh toàn bộ hệ thống
 
 ```bash
-# All services status
-docker compose -f /opt/openclaw/docker-compose.yml ps
-systemctl status openclaw-mgmt
+# Trạng thái tất cả services
+systemctl status openclaw caddy openclaw-mgmt
 
-# OpenClaw logs
-docker compose -f /opt/openclaw/docker-compose.yml logs --tail=30 openclaw
+# Logs OpenClaw
+journalctl -u openclaw --no-pager -n 30
 
-# Caddy logs
-docker compose -f /opt/openclaw/docker-compose.yml logs --tail=30 caddy
+# Logs Caddy
+journalctl -u caddy --no-pager -n 30
 
-# Management API logs
+# Logs Management API
 journalctl -u openclaw-mgmt --since "30 minutes ago" --no-pager
 
-# Current config
+# Config hiện tại
 cat /opt/openclaw/config/openclaw.json | jq .
 
 # API keys
@@ -536,7 +534,7 @@ df -h / && free -m
 cat /opt/openclaw/Caddyfile
 ```
 
-### Test Management API from VPS
+### Test Management API từ VPS
 
 ```bash
 MGMT_KEY=$(grep OPENCLAW_MGMT_API_KEY /opt/openclaw/.env | cut -d= -f2)
@@ -544,20 +542,21 @@ MGMT_KEY=$(grep OPENCLAW_MGMT_API_KEY /opt/openclaw/.env | cut -d= -f2)
 # Health check
 curl -s -H "Authorization: Bearer $MGMT_KEY" http://localhost:9998/api/status | jq .
 
-# View config
+# Xem config
 curl -s -H "Authorization: Bearer $MGMT_KEY" http://localhost:9998/api/config | jq .
 
-# View system info
+# Xem system info
 curl -s -H "Authorization: Bearer $MGMT_KEY" http://localhost:9998/api/system | jq .
 ```
 
-### Full recovery (worst case)
+### Khôi phục toàn bộ (worst case)
 
 ```bash
 cd /opt/openclaw
 
 # Stop everything
-docker compose down
+systemctl stop openclaw
+systemctl stop caddy
 
 # Reset config
 cp /etc/openclaw/config/anthropic.json config/openclaw.json
@@ -566,11 +565,12 @@ jq --arg t "$TOKEN" '.gateway.auth.token = $t' config/openclaw.json > /tmp/oc.js
 mv /tmp/oc.json config/openclaw.json
 
 # Restart
-docker compose up -d
+systemctl start openclaw
+systemctl start caddy
 systemctl restart openclaw-mgmt
 
 # Verify
-docker compose ps
+systemctl status openclaw caddy openclaw-mgmt
 curl -s -H "Authorization: Bearer $(grep OPENCLAW_MGMT_API_KEY .env | cut -d= -f2)" \
   http://localhost:9998/api/status | jq .
 ```

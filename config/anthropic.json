@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic/claude-opus-4-5"
+        "primary": "anthropic/claude-opus-4-6"
       },
       "maxConcurrent": 4,
       "subagents": {
@@ -19,9 +19,7 @@
     "trustedProxies": ["127.0.0.1", "::1", "172.16.0.0/12", "10.0.0.0/8", "192.168.0.0/16"],
     "controlUi": {
       "enabled": true,
-      "allowInsecureAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true,
-      "dangerouslyDisableDeviceAuth": false
+      "dangerouslyAllowHostHeaderOriginFallback": true
     }
   },
   "browser": {

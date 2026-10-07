@@ -1,47 +1,92 @@
 #!/usr/bin/env node
 // =============================================================================
-// OpenClaw Management API — None Docker Compose based service management
+// OpenClaw Management API — Docker Compose based service management
 // Auth: Bearer OPENCLAW_MGMT_API_KEY | Port: 9998 | Systemd: openclaw-mgmt.service
 // =============================================================================
 
 const http = require('http');
-const { execSync, exec, execFileSync, spawn } = require('child_process');
+const path = require('path');
+const { execSync, exec, spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
-const path = require('path');
-
 
 const PORT = 9998;
-const MGMT_VERSION = '1.0.29';
-const GITHUB_REPO = 'Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management';
+// Version is read from version.json next to server.js (single source of truth,
+// kept in sync by self-update). Falls back to this constant if the file is missing.
+const MGMT_VERSION_FALLBACK = '2.1.4';
+const MGMT_VERSION = (() => {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(__dirname, 'version.json'), 'utf8'));
+    return (v && typeof v.version === 'string' && v.version.trim()) || MGMT_VERSION_FALLBACK;
+  } catch {
+    return MGMT_VERSION_FALLBACK;
+  }
+})();
+const GITHUB_REPO = 'hitechcloud-vietnam/vps-openclaw-management';
 const COMPOSE_DIR = '/opt/openclaw';
-const COMPOSE_CMD = `docker compose -f ${COMPOSE_DIR}/docker-compose.yml`;
+const OPENCLAW_BIN = 'openclaw';
+const OPENCLAW_SERVICE = 'openclaw';
+const CADDY_SERVICE = 'caddy';
 const CONFIG_DIR = `${COMPOSE_DIR}/config`;
 const ENV_FILE = `${COMPOSE_DIR}/.env`;
 const CADDYFILE = `${COMPOSE_DIR}/Caddyfile`;
 const TEMPLATES_DIR = '/etc/openclaw/config';
 const AUTH_PROFILES_DIR = `${CONFIG_DIR}/agents/main/agent`;
 const AUTH_PROFILES_FILE = `${AUTH_PROFILES_DIR}/auth-profiles.json`;
-const AGENT_WORKSPACE_FILES = [
-  'AGENTS.md',
-  'SOUL.md',
-  'TOOLS.md',
-  'IDENTITY.md',
-  'USER.md',
-  'HEARTBEAT.md',
-  'BOOTSTRAP.md',
-  'MEMORY.md',
-  'memory.md'
-];
+const OPENCLAW_HOME_DIR = `${COMPOSE_DIR}/.openclaw`;
+
+// ---------------------------------------------------------------------------
+// ensureRealConfigDir — OpenClaw >= 2026.9.1 ghi file bang atomic-replace va
+// tu choi neu thu muc cha la symlink:
+//   "Atomic replace parent must be a real directory: /opt/openclaw/.openclaw"
+// Layout cu (.openclaw -> config) lam gateway crash-loop. Dao lai: .openclaw la
+// thu muc that, config la symlink tro toi no (giu nguyen moi duong dan cu).
+// ---------------------------------------------------------------------------
+function ensureRealConfigDir() {
+  try {
+    const homeIsLink = fs.lstatSync(OPENCLAW_HOME_DIR).isSymbolicLink();
+    if (homeIsLink) {
+      const target = fs.realpathSync(OPENCLAW_HOME_DIR);
+      fs.unlinkSync(OPENCLAW_HOME_DIR);
+      if (target !== OPENCLAW_HOME_DIR && fs.existsSync(target)) {
+        fs.renameSync(target, OPENCLAW_HOME_DIR);
+      }
+      console.log('[MGMT] Migrated .openclaw symlink -> real directory');
+    }
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('[MGMT] ensureRealConfigDir:', e.message);
+  }
+  try { fs.mkdirSync(OPENCLAW_HOME_DIR, { recursive: true }); } catch {}
+  try {
+    if (!fs.lstatSync(CONFIG_DIR).isSymbolicLink()) {
+      execSync(`cp -an ${CONFIG_DIR}/. ${OPENCLAW_HOME_DIR}/ 2>/dev/null || true`);
+      fs.rmSync(CONFIG_DIR, { recursive: true, force: true });
+      fs.symlinkSync(OPENCLAW_HOME_DIR, CONFIG_DIR);
+      console.log('[MGMT] Recreated config as symlink -> .openclaw');
+    }
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      try { fs.symlinkSync(OPENCLAW_HOME_DIR, CONFIG_DIR); } catch {}
+    } else {
+      console.error('[MGMT] ensureRealConfigDir(config):', e.message);
+    }
+  }
+}
 
 // --- GitHub version check (cached) ---
 let _latestVersionCache = { version: null, checkedAt: 0 };
 const VERSION_CHECK_INTERVAL = 60 * 1000; // 1 minute
+
 // --- ChatGPT OAuth (OpenAI Codex) PKCE sessions ---
-const _oauthSessions = {}; // sessionId → { codeVerifier, clientId, agentId, createdAt }
+const _oauthSessions = {}; // sessionId → { codeVerifier, state, agentId, createdAt }
 const OAUTH_SESSION_TTL = 10 * 60 * 1000; // 10 minutes
 let _oauthClientCache = null;
+
+// --- ChatGPT OAuth device-code sessions (background polling) ---
+// sessionId → { deviceAuthId, userCode, verificationUrl, intervalMs, agentId, model,
+//               switchProvider, createdAt, deadline, status, result?, error?, timer? }
+const _deviceSessions = {};
 
 function getLatestVersion() {
   const now = Date.now();
@@ -50,7 +95,7 @@ function getLatestVersion() {
   }
   try {
     const raw = execSync(
-      `curl -sf --max-time 5 "https://api.github.com/repos/${GITHUB_REPO}/contents/version.json" -H "Accept: application/vnd.github.v3.raw" 2>/dev/null`,
+      `curl -sf --max-time 5 "https://api.github.com/repos/${GITHUB_REPO}/contents/version.json?ref=main" -H "Accept: application/vnd.github.v3.raw" 2>/dev/null`,
       { encoding: 'utf8', timeout: 8000 }
     );
     const data = JSON.parse(raw);
@@ -93,17 +138,14 @@ const MAX_AUTH_FAILURES = 10;
 const BLOCK_DURATION = 15 * 60 * 1000;
 const authAttempts = {};
 
-// IP Whitelist — only these IPs can access the Management API
+// IP Whitelist — these IPs/CIDRs bypass auth rate limiting
+// Supports single IPs and CIDR ranges (IPv4 + IPv6)
 const ALLOWED_IPS = [
-  '103.130.216.5',
-  '103.130.216.57',
-  '103.130.216.58',
-  '103.241.42.12',
-  '103.241.42.10',
-  '103.130.217.10',
-  '116.118.2.45',
-  '127.0.0.1',       // localhost
-  '::1',             // localhost IPv6
+  '127.0.0.1',
+  '::1',
+  '103.130.216.0/23',     // HiTechCloud subnet (covers 103.130.216.0 - 103.130.217.255)
+  '103.241.42.0/24',
+  '2405:2840:0:216::/64', // HiTechCloud IPv6 subnet
 ];
 
 // =============================================================================
@@ -111,6 +153,41 @@ const ALLOWED_IPS = [
 // =============================================================================
 function getClientIP(req) {
   return req.socket.remoteAddress.replace('::ffff:', '');
+}
+
+// CIDR matching (IPv4 + IPv6 via BigInt)
+function ipv4ToBigInt(ip) {
+  return ip.split('.').reduce((a, o) => (a << 8n) + BigInt(parseInt(o, 10) || 0), 0n);
+}
+
+function ipv6ToBigInt(ip) {
+  const parts = ip.split('::');
+  const head = parts[0] ? parts[0].split(':') : [];
+  const tail = parts.length > 1 && parts[1] ? parts[1].split(':') : [];
+  const fill = 8 - head.length - tail.length;
+  const groups = [...head, ...Array(Math.max(0, fill)).fill('0'), ...tail];
+  return groups.reduce((a, g) => (a << 16n) + BigInt(parseInt(g || '0', 16) || 0), 0n);
+}
+
+function isWhitelisted(ip) {
+  for (const entry of ALLOWED_IPS) {
+    if (!entry.includes('/')) {
+      if (entry === ip) return true;
+      continue;
+    }
+    const [base, bitsStr] = entry.split('/');
+    const bits = parseInt(bitsStr, 10);
+    const isV6 = base.includes(':');
+    if (isV6 !== ip.includes(':')) continue;
+    try {
+      const totalBits = isV6 ? 128 : 32;
+      const ipInt = isV6 ? ipv6ToBigInt(ip) : ipv4ToBigInt(ip);
+      const baseInt = isV6 ? ipv6ToBigInt(base) : ipv4ToBigInt(base);
+      const mask = ((1n << BigInt(bits)) - 1n) << BigInt(totalBits - bits);
+      if ((ipInt & mask) === (baseInt & mask)) return true;
+    } catch {}
+  }
+  return false;
 }
 
 function isBlocked(ip) {
@@ -240,579 +317,138 @@ function writeConfig(config) {
   fs.writeFileSync(`${CONFIG_DIR}/openclaw.json`, JSON.stringify(config, null, 2), 'utf8');
 }
 
-function isPlainObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function deepClone(value) {
-  if (value === undefined) return undefined;
-  return JSON.parse(JSON.stringify(value));
-}
-
-function deepMerge(target, source) {
-  if (Array.isArray(source)) return deepClone(source);
-  if (!isPlainObject(source)) return source;
-
-  const output = isPlainObject(target) ? deepClone(target) : {};
-  for (const [key, value] of Object.entries(source)) {
-    if (Array.isArray(value)) {
-      output[key] = deepClone(value);
-    } else if (isPlainObject(value)) {
-      output[key] = deepMerge(output[key], value);
-    } else {
-      output[key] = value;
-    }
-  }
-  return output;
-}
-
-function isSensitiveKeyName(key) {
-  return /(token|key|secret|password)/i.test(String(key || ''));
-}
-
-function redactSensitiveData(value, parentKey = '') {
-  if (Array.isArray(value)) {
-    return value.map(item => redactSensitiveData(item, parentKey));
-  }
-  if (isPlainObject(value)) {
-    const out = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (typeof item === 'string' && isSensitiveKeyName(key)) {
-        out[key] = sanitizeKey(item);
-      } else {
-        out[key] = redactSensitiveData(item, key);
-      }
-    }
-    return out;
-  }
-  if (typeof value === 'string' && isSensitiveKeyName(parentKey)) {
-    return sanitizeKey(value);
-  }
-  return value;
-}
-
-function getValueAtPath(obj, rawPath) {
-  if (!rawPath) return { exists: true, value: obj };
-  const parts = String(rawPath).replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean);
-  let current = obj;
-  for (const part of parts) {
-    if (current === null || current === undefined || !(part in Object(current))) {
-      return { exists: false, value: undefined };
-    }
-    current = current[part];
-  }
-  return { exists: true, value: current };
-}
-
-function setValueAtPath(obj, rawPath, value) {
-  const parts = String(rawPath).replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean);
-  if (parts.length === 0) return value;
-
-  let current = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    const part = parts[i];
-    const nextPart = parts[i + 1];
-    if (!isPlainObject(current[part]) && !Array.isArray(current[part])) {
-      current[part] = /^\d+$/.test(nextPart) ? [] : {};
-    }
-    current = current[part];
-  }
-  current[parts[parts.length - 1]] = value;
-  return obj;
-}
-
-function deleteValueAtPath(obj, rawPath) {
-  const parts = String(rawPath).replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean);
-  if (parts.length === 0) return false;
-
-  let current = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    const part = parts[i];
-    if (current === null || current === undefined || !(part in Object(current))) return false;
-    current = current[part];
-  }
-
-  const last = parts[parts.length - 1];
-  if (Array.isArray(current) && /^\d+$/.test(last)) {
-    const index = parseInt(last, 10);
-    if (index < 0 || index >= current.length) return false;
-    current.splice(index, 1);
-    return true;
-  }
-  if (isPlainObject(current) && Object.prototype.hasOwnProperty.call(current, last)) {
-    delete current[last];
-    return true;
-  }
-  return false;
-}
-
-function flattenConfigSchema(value, prefix = '', output = []) {
-  const type = Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value);
-  if (prefix) {
-    const item = { path: prefix, type };
-    if (Array.isArray(value)) item.length = value.length;
-    if (isPlainObject(value)) item.keys = Object.keys(value);
-    if (!Array.isArray(value) && !isPlainObject(value)) item.sample = value;
-    output.push(item);
-  }
-
-  if (Array.isArray(value) && value.length > 0) {
-    flattenConfigSchema(value[0], `${prefix}[]`, output);
-  } else if (isPlainObject(value)) {
-    for (const [key, child] of Object.entries(value)) {
-      flattenConfigSchema(child, prefix ? `${prefix}.${key}` : key, output);
-    }
-  }
-  return output;
-}
-
-function getConfigSchemaSample() {
-  let sample = {};
-  try {
-    sample = deepMerge(sample, readConfig());
-  } catch {}
-
-  for (const provider of Object.values(PROVIDERS)) {
-    try {
-      const tpl = JSON.parse(fs.readFileSync(provider.configTemplate, 'utf8'));
-      sample = deepMerge(sample, tpl);
-    } catch {}
-  }
-  return sample;
-}
-
-function normalizeManagedPath(input) {
-  if (!input || typeof input !== 'string') return null;
-  if (input === '~/.openclaw') return CONFIG_DIR;
-  if (input.startsWith('~/.openclaw/')) {
-    return `${CONFIG_DIR}/${input.slice('~/.openclaw/'.length)}`;
-  }
-  return input;
-}
-
-function ensureDirectory(dirPath) {
-  fs.mkdirSync(dirPath, { recursive: true });
-  return dirPath;
-}
-
-function isValidSkillKey(skillKey) {
-  return typeof skillKey === 'string' && /^[a-z0-9][a-z0-9-_]{0,63}$/.test(skillKey);
-}
-
-function getAgentById(config, agentId = 'main') {
-  const agent = getAgentsList(config).find(item => item.id === agentId);
-  if (agent) return agent;
-  if (agentId === 'main') {
-    return {
-      id: 'main',
-      default: true,
-      name: 'Main Agent',
-      workspace: '~/.openclaw/workspace-main',
-      agentDir: '~/.openclaw/agents/main/agent'
-    };
-  }
-  return null;
-}
-
-function getAgentWorkspaceDir(config, agentId = 'main') {
-  const agent = getAgentById(config, agentId);
-  const workspace = agent?.workspace || `~/.openclaw/workspace-${agentId}`;
-  return normalizeManagedPath(workspace);
-}
-
-function isAllowedAgentWorkspaceFile(name) {
-  return typeof name === 'string' && AGENT_WORKSPACE_FILES.includes(name);
-}
-
-function getAgentWorkspaceFileInfo(workspaceDir, name) {
-  const filePath = path.join(workspaceDir, name);
-  try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) {
-      return { name, path: filePath, exists: false, missing: true };
-    }
-    return {
-      name,
-      path: filePath,
-      exists: true,
-      missing: false,
-      size: stat.size,
-      updatedAtMs: Math.floor(stat.mtimeMs)
-    };
-  } catch {
-    return { name, path: filePath, exists: false, missing: true };
-  }
-}
-
-function resolveAgentWorkspaceFile(config, agentId, name) {
-  if (!isValidAgentId(agentId)) {
-    throw new Error('Invalid agent id');
-  }
-  const decodedName = decodeURIComponent(String(name || ''));
-  if (!isAllowedAgentWorkspaceFile(decodedName)) {
-    throw new Error('Unsupported workspace file name');
-  }
-
-  const workspaceDir = getAgentWorkspaceDir(config, agentId);
-  const resolvedWorkspaceDir = path.resolve(workspaceDir);
-  const filePath = path.resolve(resolvedWorkspaceDir, decodedName);
-
-  if (path.dirname(filePath) !== resolvedWorkspaceDir) {
-    throw new Error('Unsafe workspace file path');
-  }
-
-  return {
-    agentId,
-    name: decodedName,
-    workspaceDir,
-    filePath
-  };
-}
-
-function getWorkspaceSkillsDir(config, agentId = 'main') {
-  return `${getAgentWorkspaceDir(config, agentId)}/skills`;
-}
-
-function getManagedSkillsDir() {
-  return `${CONFIG_DIR}/skills`;
-}
-
-function getExtraSkillDirs(config) {
-  const dirs = config?.skills?.load?.extraDirs;
-  if (!Array.isArray(dirs)) return [];
-  return dirs.map(normalizeManagedPath).filter(Boolean);
-}
-
-function parseFrontmatterValue(rawValue) {
-  const value = String(rawValue || '').trim();
-  if (!value) return '';
-  if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
-    try { return JSON.parse(value); } catch {}
-  }
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function parseSkillDocument(content) {
-  const text = String(content || '');
-  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) {
-    return { frontmatter: {}, body: text.trim() };
-  }
-
-  const frontmatter = {};
-  for (const rawLine of match[1].split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const idx = line.indexOf(':');
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
-    frontmatter[key] = parseFrontmatterValue(value);
-  }
-
-  return { frontmatter, body: match[2].trim() };
-}
-
-function getSkillOpenClawMetadata(frontmatter) {
-  const metadata = frontmatter?.metadata;
-  if (!metadata) return {};
-  if (isPlainObject(metadata.openclaw)) return metadata.openclaw;
-  return isPlainObject(metadata) ? metadata : {};
-}
-
-function normalizeStringList(input) {
-  if (Array.isArray(input)) return input.map(item => String(item).trim()).filter(Boolean);
-  if (typeof input === 'string') {
-    return input.split(/\r?\n/).map(item => item.replace(/^[-*]\s*/, '').trim()).filter(Boolean);
-  }
-  return [];
-}
-
-function collectSkillBins(metadata) {
-  const bins = new Set();
-  const requires = metadata?.requires || {};
-  for (const bin of normalizeStringList(requires.bins)) bins.add(bin);
-  for (const bin of normalizeStringList(requires.anyBins)) bins.add(bin);
-  if (Array.isArray(metadata?.install)) {
-    for (const installer of metadata.install) {
-      for (const bin of normalizeStringList(installer?.bins)) bins.add(bin);
-    }
-  }
-  return [...bins].sort();
-}
-
-function listSkillsInDirectory(rootDir, source, config, agentId = 'main') {
-  if (!rootDir || !fs.existsSync(rootDir)) return [];
-  const entries = fs.readdirSync(rootDir, { withFileTypes: true }).filter(entry => entry.isDirectory());
-  const results = [];
-
-  for (const entry of entries) {
-    const skillDir = `${rootDir}/${entry.name}`;
-    const skillFile = `${skillDir}/SKILL.md`;
-    if (!fs.existsSync(skillFile)) continue;
-
-    try {
-      const raw = fs.readFileSync(skillFile, 'utf8');
-      const parsed = parseSkillDocument(raw);
-      const metadata = getSkillOpenClawMetadata(parsed.frontmatter);
-      const skillKey = parsed.frontmatter.name || entry.name;
-      const configEntry = deepClone(config?.skills?.entries?.[skillKey] || {});
-      results.push({
-        skillKey,
-        directoryName: entry.name,
-        title: parsed.body.split(/\r?\n/).find(line => line.trim().startsWith('# '))?.replace(/^#\s+/, '').trim() || skillKey,
-        description: parsed.frontmatter.description || '',
-        source,
-        agentId,
-        path: skillFile,
-        skillDir,
-        metadata,
-        requiredBins: collectSkillBins(metadata),
-        configEntry,
-        contentPreview: parsed.body.slice(0, 240).trim(),
-        frontmatter: parsed.frontmatter,
-        content: raw
-      });
-    } catch {}
-  }
-
-  return results;
-}
-
-function listAvailableSkills(config, agentId = 'main') {
-  const seen = new Set();
-  const skills = [];
-  const roots = [
-    { source: 'workspace', path: getWorkspaceSkillsDir(config, agentId) },
-    { source: 'managed', path: getManagedSkillsDir() },
-    ...getExtraSkillDirs(config).map(path => ({ source: 'extra', path }))
-  ];
-
-  for (const root of roots) {
-    for (const skill of listSkillsInDirectory(root.path, root.source, config, agentId)) {
-      if (seen.has(skill.skillKey)) continue;
-      seen.add(skill.skillKey);
-      skills.push(skill);
-    }
-  }
-
-  return { roots, skills };
-}
-
-function findWorkspaceSkill(config, agentId, skillKey) {
-  const skills = listSkillsInDirectory(getWorkspaceSkillsDir(config, agentId), 'workspace', config, agentId);
-  return skills.find(skill => skill.skillKey === skillKey || skill.directoryName === skillKey) || null;
-}
-
-function escapeYamlScalar(value) {
-  return String(value || '').replace(/"/g, '\\"');
-}
-
-function buildBulletSection(title, items, fallback = 'Not specified.') {
-  const values = normalizeStringList(items);
-  const body = values.length > 0 ? values.map(item => `- ${item}`).join('\n') : fallback;
-  return `## ${title}\n\n${body}`;
-}
-
-function buildCustomSkillMarkdown(input) {
-  const skillKey = input.skillKey;
-  const title = input.title || skillKey;
-  const description = input.description || `Custom workspace skill for ${skillKey}.`;
-  const metadata = isPlainObject(input.metadata) ? input.metadata : {};
-  const metadataLine = Object.keys(metadata).length > 0 ? `metadata: ${JSON.stringify({ openclaw: metadata })}\n` : '';
-
-  const sections = [
-    `# ${title}`,
-    '',
-    input.summary || `Use this skill when the user request matches the \`${skillKey}\` workflow. Follow the guidance below and keep responses grounded in the available tools, inputs, and safety constraints.`,
-    '',
-    buildBulletSection('When to Use', input.activation || input.activationTriggers, 'Use when the user explicitly asks for this workflow, asks for equivalent domain actions, or provides matching input data.'),
-    '',
-    buildBulletSection('Inputs to Collect', input.inputs, 'Collect all required arguments, missing identifiers, target environment details, and any authentication or confirmation requirements before acting.'),
-    '',
-    buildBulletSection('Execution Workflow', input.workflow || input.instructions, '1. Confirm the goal.\n2. Validate prerequisites.\n3. Run the smallest safe action first.\n4. Summarize the result and next steps.'),
-    '',
-    buildBulletSection('Expected Output', input.outputs, 'Return a concise result summary, important fields, and any follow-up action the user should take.'),
-    '',
-    buildBulletSection('Command Examples', input.commandExamples, 'Add slash-command or shell examples here when the workflow is finalized.'),
-    '',
-    buildBulletSection('Configuration Notes', input.configNotes || input.configHints, 'Document required config keys, environment variables, and optional overrides for this skill.'),
-    '',
-    buildBulletSection('Safety and Guardrails', input.safetyNotes, 'Do not fabricate results. Validate destructive actions, protect secrets, and ask for confirmation before risky changes.'),
-    '',
-    buildBulletSection('Troubleshooting', input.troubleshooting, 'If the workflow fails, report the exact step that failed, include the relevant error, and suggest the next safe diagnostic action.')
-  ];
-
-  return `---\nname: ${skillKey}\ndescription: \"${escapeYamlScalar(description)}\"\n${metadataLine}---\n\n${sections.join('\n')}`.trim() + '\n';
-}
-
 // --- Auth profiles helpers ---
-
-function toSkillKey(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
-}
-
-function trimLineBlock(lines) {
-  const copy = Array.isArray(lines) ? [...lines] : [];
-  while (copy.length > 0 && !String(copy[0] || '').trim()) copy.shift();
-  while (copy.length > 0 && !String(copy[copy.length - 1] || '').trim()) copy.pop();
-  return copy.join('\n').trim();
-}
-
-function parseCustomSkillContent(content) {
-  const parsed = parseSkillDocument(content);
-  const lines = String(parsed.body || '').split(/\r?\n/);
-  let cursor = 0;
-  let title = '';
-
-  while (cursor < lines.length) {
-    const line = lines[cursor].trim();
-    if (!line) {
-      cursor += 1;
-      continue;
-    }
-    if (line.startsWith('# ')) {
-      title = line.replace(/^#\s+/, '').trim();
-      cursor += 1;
-    }
-    break;
-  }
-
-  const summaryLines = [];
-  while (cursor < lines.length && !lines[cursor].trim().startsWith('## ')) {
-    summaryLines.push(lines[cursor]);
-    cursor += 1;
-  }
-
-  const sections = {};
-  let currentSection = null;
-  let currentLines = [];
-  const flushSection = () => {
-    if (!currentSection) return;
-    const text = trimLineBlock(currentLines);
-    sections[currentSection] = {
-      text,
-      items: normalizeStringList(text)
-    };
-  };
-
-  for (; cursor < lines.length; cursor += 1) {
-    const line = lines[cursor];
-    const trimmed = line.trim();
-    if (trimmed.startsWith('## ')) {
-      flushSection();
-      currentSection = trimmed.replace(/^##\s+/, '').trim();
-      currentLines = [];
-      continue;
-    }
-    currentLines.push(line);
-  }
-  flushSection();
-
-  return {
-    frontmatter: parsed.frontmatter,
-    body: parsed.body,
-    title: title || parsed.frontmatter.name || '',
-    description: parsed.frontmatter.description || '',
-    metadata: getSkillOpenClawMetadata(parsed.frontmatter),
-    summary: trimLineBlock(summaryLines),
-    sections,
-    activation: sections['When to Use']?.items || [],
-    inputs: sections['Inputs to Collect']?.items || [],
-    workflow: sections['Execution Workflow']?.items || [],
-    outputs: sections['Expected Output']?.items || [],
-    commandExamples: sections['Command Examples']?.items || [],
-    configNotes: sections['Configuration Notes']?.items || [],
-    safetyNotes: sections['Safety and Guardrails']?.items || [],
-    troubleshooting: sections['Troubleshooting']?.items || []
-  };
-}
-
-function validateCustomSkillContent(content, expectedSkillKey = '') {
-  const parsed = parseCustomSkillContent(content);
-  const issues = [];
-  const skillKey = expectedSkillKey || parsed.frontmatter.name || toSkillKey(parsed.title);
-
-  if (!isValidSkillKey(skillKey)) {
-    issues.push('Missing or invalid skill key. Use lowercase letters, numbers, hyphens, or underscores.');
-  }
-  if (!parsed.title) issues.push('Missing title heading (`# Title`).');
-  if (!parsed.summary) issues.push('Missing summary paragraph below the title.');
-
-  const sectionChecks = [
-    ['When to Use', parsed.activation],
-    ['Inputs to Collect', parsed.inputs],
-    ['Execution Workflow', parsed.workflow],
-    ['Expected Output', parsed.outputs],
-    ['Safety and Guardrails', parsed.safetyNotes],
-    ['Troubleshooting', parsed.troubleshooting]
-  ];
-  const missingSections = [];
-  for (const [title, items] of sectionChecks) {
-    if (!Array.isArray(items) || items.length === 0) {
-      missingSections.push(title);
-      issues.push(`Section '${title}' is empty or missing.`);
-    }
-  }
-
-  return {
-    ok: issues.length === 0,
-    skillKey,
-    issues,
-    missingSections,
-    parsed
-  };
-}
-
-function buildCustomSkillResponse(skill, options = {}) {
-  const includeContent = options.includeContent !== false;
-  const parsed = parseCustomSkillContent(skill.content || '');
-  let stats = null;
-  try {
-    stats = fs.statSync(skill.path);
-  } catch {}
-
-  return {
-    skillKey: skill.skillKey,
-    agentId: skill.agentId,
-    title: parsed.title || skill.title,
-    description: parsed.description || skill.description,
-    source: skill.source,
-    path: skill.path,
-    directory: skill.directoryName,
-    skillDir: skill.skillDir,
-    metadata: parsed.metadata,
-    frontmatter: parsed.frontmatter,
-    summary: parsed.summary,
-    sections: parsed.sections,
-    activation: parsed.activation,
-    inputs: parsed.inputs,
-    workflow: parsed.workflow,
-    outputs: parsed.outputs,
-    commandExamples: parsed.commandExamples,
-    configNotes: parsed.configNotes,
-    safetyNotes: parsed.safetyNotes,
-    troubleshooting: parsed.troubleshooting,
-    requiredBins: skill.requiredBins,
-    enabled: skill.configEntry?.enabled !== false,
-    configEntry: redactSensitiveData(skill.configEntry),
-    validation: validateCustomSkillContent(skill.content || '', skill.skillKey),
-    createdAt: stats?.birthtime ? stats.birthtime.toISOString() : null,
-    updatedAt: stats?.mtime ? stats.mtime.toISOString() : null,
-    content: includeContent ? skill.content : undefined
-  };
-}
 function getAgentAuthDir(agentId) {
   return `${CONFIG_DIR}/agents/${agentId}/agent`;
+}
+
+function getAgentSqlitePath(agentId) {
+  return `${getAgentAuthDir(agentId)}/openclaw-agent.sqlite`;
+}
+
+// OpenClaw >= 2026.9: doctor nap auth-profiles.json vao store DUNG CHUNG
+// state/openclaw.sqlite, bang config_machine_state, state_key 'authProfiles.store'
+// (auth_profile_store cua agent con rong). Chi doc (read-only); xoa qua CLI.
+function readSharedProfiles() {
+  const dbPath = `${CONFIG_DIR}/state/openclaw.sqlite`;
+  if (!fs.existsSync(dbPath)) return {};
+  let db;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'authProfiles.store'").get();
+    return (row && JSON.parse(row.value_json).profiles) || {};
+  } catch {
+    return {};
+  } finally {
+    try { if (db) db.close(); } catch {}
+  }
+}
+
+// Go profile khoi store dung chung bang `openclaw models auth logout` (gateway dang
+// chay van chay duoc). match(id, profile) chon profile can go. Tra ve so profile da go.
+function logoutSharedProfiles(agentId, match) {
+  const q = s => `'${String(s).replace(/'/g, "'\\''")}'`;
+  let removed = 0;
+  for (const [id, p] of Object.entries(readSharedProfiles())) {
+    if (!match(id, p)) continue;
+    try { openclawExec(`models auth logout ${q(id)} --yes --agent ${q(agentId)}`, 60000); removed++; } catch {}
+  }
+  return removed;
+}
+
+// Remove all profiles for a provider directly from the SQLite auth store.
+// `openclaw doctor` MERGES auth-profiles.json into SQLite (never prunes), so
+// deleting a key from JSON alone leaves it live in SQLite. This closes that gap.
+// Returns number of profiles removed, or -1 if SQLite/the table is unavailable.
+function removeProviderFromSqlite(agentId, providerName) {
+  const dbPath = getAgentSqlitePath(agentId);
+  if (!fs.existsSync(dbPath)) return 0;
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); }
+  catch { return -1; } // Node < 22.5 — caller falls back to doctor-only
+  const db = new DatabaseSync(dbPath);
+  try {
+    const rows = db.prepare('SELECT store_key, store_json FROM auth_profile_store').all();
+    let removed = 0;
+    for (const row of rows) {
+      let store;
+      try { store = JSON.parse(row.store_json); } catch { continue; }
+      if (!store || !store.profiles) continue;
+      let changed = false;
+      for (const [id, p] of Object.entries(store.profiles)) {
+        if (p && p.provider === providerName) { delete store.profiles[id]; removed++; changed = true; }
+      }
+      if (changed) {
+        db.prepare('UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?')
+          .run(JSON.stringify(store), Date.now(), row.store_key);
+      }
+    }
+    return removed;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+// Read merged auth profiles from the SQLite store (openclaw-agent.sqlite).
+// `openclaw doctor` imports auth-profiles.json INTO SQLite and then empties the
+// JSON, so the JSON file alone is not a reliable source of "what is connected".
+// Returns a flat { profileKey: profile } map, or null if SQLite is unavailable.
+function readSqliteProfiles(agentId) {
+  const shared = readSharedProfiles();
+  const sharedOrNull = Object.keys(shared).length ? shared : null;
+  const dbPath = getAgentSqlitePath(agentId);
+  if (!fs.existsSync(dbPath)) return sharedOrNull;
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); }
+  catch { return null; } // Node < 22.5
+  const db = new DatabaseSync(dbPath);
+  try {
+    const rows = db.prepare('SELECT store_key, store_json FROM auth_profile_store').all();
+    const merged = { ...shared }; // profile rieng cua agent de len store dung chung
+    for (const row of rows) {
+      let store;
+      try { store = JSON.parse(row.store_json); } catch { continue; }
+      if (store && store.profiles) Object.assign(merged, store.profiles);
+    }
+    return merged;
+  } catch {
+    return sharedOrNull;
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+// Remove specific profile key(s) from the SQLite auth store. Pass a Set/array of
+// store keys, or null to match by predicate. Returns number removed, -1 if N/A.
+function removeProfileKeysFromSqlite(agentId, keys) {
+  const dbPath = getAgentSqlitePath(agentId);
+  if (!fs.existsSync(dbPath)) return 0;
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); }
+  catch { return -1; }
+  const keySet = new Set(keys || []);
+  const db = new DatabaseSync(dbPath);
+  try {
+    const rows = db.prepare('SELECT store_key, store_json FROM auth_profile_store').all();
+    let removed = 0;
+    for (const row of rows) {
+      let store;
+      try { store = JSON.parse(row.store_json); } catch { continue; }
+      if (!store || !store.profiles) continue;
+      let changed = false;
+      for (const id of Object.keys(store.profiles)) {
+        if (keySet.has(id)) { delete store.profiles[id]; removed++; changed = true; }
+      }
+      if (changed) {
+        db.prepare('UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?')
+          .run(JSON.stringify(store), Date.now(), row.store_key);
+      }
+    }
+    return removed;
+  } finally {
+    try { db.close(); } catch {}
+  }
 }
 
 function getAgentAuthFile(agentId) {
@@ -821,16 +457,22 @@ function getAgentAuthFile(agentId) {
 
 function readAgentAuth(agentId) {
   try {
-    return JSON.parse(fs.readFileSync(getAgentAuthFile(agentId), 'utf8'));
+    const data = JSON.parse(fs.readFileSync(getAgentAuthFile(agentId), 'utf8'));
+    if (typeof data.version !== 'number') data.version = 1;
+    if (!data.profiles) data.profiles = {};
+    return data;
   } catch {
-    return { profiles: {} };
+    return { version: 1, profiles: {} };
   }
 }
 
-function writeAgentAuth(agentId, profiles) {
+// OpenClaw's auth store format is { version: 1, profiles: {...} }. `openclaw doctor`
+// reads this file and imports it into the SQLite auth store (openclaw-agent.sqlite).
+function writeAgentAuth(agentId, data) {
   const dir = getAgentAuthDir(agentId);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(getAgentAuthFile(agentId), JSON.stringify(profiles, null, 2), 'utf8');
+  const out = { version: typeof data.version === 'number' ? data.version : 1, profiles: data.profiles || {} };
+  fs.writeFileSync(getAgentAuthFile(agentId), JSON.stringify(out, null, 2), 'utf8');
 }
 
 function setAgentApiKey(agentId, providerName, apiKey) {
@@ -846,6 +488,13 @@ function setAgentApiKey(agentId, providerName, apiKey) {
 }
 
 function getAgentApiKey(agentId, providerName) {
+  const sqliteProfiles = readSqliteProfiles(agentId);
+  if (sqliteProfiles) {
+    for (const [id, profile] of Object.entries(sqliteProfiles)) {
+      if (profile && profile.provider === providerName && profile.key) return profile.key;
+    }
+  }
+
   const data = readAgentAuth(agentId);
   const profiles = data.profiles || {};
   for (const [id, profile] of Object.entries(profiles)) {
@@ -855,13 +504,21 @@ function getAgentApiKey(agentId, providerName) {
 }
 
 function removeAgentApiKey(agentId, providerName) {
+  // 1. Remove from JSON (all profiles for this provider, not just ":manual").
   const data = readAgentAuth(agentId);
-  if (!data.profiles) return;
-  const profileId = `${providerName}:manual`;
-  if (data.profiles[profileId]) {
-    delete data.profiles[profileId];
-    writeAgentAuth(agentId, data);
+  if (data.profiles) {
+    let changed = false;
+    for (const [id, p] of Object.entries(data.profiles)) {
+      if (id === `${providerName}:manual` || (p && p.provider === providerName)) {
+        delete data.profiles[id]; changed = true;
+      }
+    }
+    if (changed) writeAgentAuth(agentId, data);
   }
+  // 2. Remove from SQLite (doctor merges, never prunes — must delete here).
+  try { removeProviderFromSqlite(agentId, providerName); } catch {}
+  // 3. Store dung chung (OpenClaw >= 2026.9).
+  try { logoutSharedProfiles(agentId, (id, p) => p && p.provider === providerName); } catch {}
 }
 
 // Backward-compatible wrappers (default to 'main' agent)
@@ -891,27 +548,41 @@ function parseTerminalCmd(cmdStr) {
   if (!parts.length) return { valid: false, error: 'Empty command' };
   const base = parts[0].toLowerCase();
 
-  // docker compose <subcommand> [args...]
-  if (base === 'docker' && parts[1] === 'compose') {
-    const sub = parts[2];
-    const allowed = ['ps', 'logs', 'restart', 'pull', 'up', 'down', 'exec', 'stats', 'images', 'top', 'config', 'ls'];
-    if (!sub || !allowed.includes(sub)) {
-      return { valid: false, error: 'Allowed docker compose subcommands: ' + allowed.join(', ') };
+  // systemctl <action> <service>
+  if (base === 'systemctl') {
+    const action = parts[1];
+    const service = parts[2];
+    const allowedActions = ['status', 'restart', 'stop', 'start'];
+    const allowedServices = [OPENCLAW_SERVICE, CADDY_SERVICE, 'openclaw-mgmt'];
+    if (!action || !allowedActions.includes(action)) {
+      return { valid: false, error: 'Allowed: systemctl ' + allowedActions.join('/') + ' ' + allowedServices.join('/') };
     }
-    const rest = parts.slice(2);
-    // Auto-inject -T for exec (no TTY for non-interactive streaming)
-    if (sub === 'exec' && !rest.includes('-T') && !rest.includes('-t')) {
-      rest.splice(1, 0, '-T');
+    if (!service || !allowedServices.includes(service)) {
+      return { valid: false, error: 'Allowed services: ' + allowedServices.join(', ') };
     }
-    return { valid: true, argv: ['docker', 'compose', '-f', COMPOSE_DIR + '/docker-compose.yml', ...rest] };
+    return { valid: true, argv: ['systemctl', action, service] };
   }
 
-  // openclaw / claw → docker compose exec -T openclaw node dist/index.js <args>
+  // journalctl -u <service> [args...]
+  if (base === 'journalctl') {
+    const allowedServices = [OPENCLAW_SERVICE, CADDY_SERVICE, 'openclaw-mgmt'];
+    const uIdx = parts.indexOf('-u');
+    const service = uIdx >= 0 ? parts[uIdx + 1] : null;
+    if (!service || !allowedServices.includes(service)) {
+      return { valid: false, error: 'Usage: journalctl -u ' + allowedServices.join('/') + ' [--no-pager -n 100 | -f]' };
+    }
+    return { valid: true, argv: parts };
+  }
+
+  // openclaw / claw → direct CLI
   if (base === 'openclaw' || base === 'claw') {
-    return {
-      valid: true,
-      argv: ['docker', 'compose', '-f', COMPOSE_DIR + '/docker-compose.yml', 'exec', '-T', 'openclaw', 'node', 'dist/index.js', ...parts.slice(1)]
-    };
+    return { valid: true, argv: [OPENCLAW_BIN, ...parts.slice(1)] };
+  }
+
+  // npm update|install -g openclaw[@latest]
+  if (base === 'npm' && (parts[1] === 'update' || parts[1] === 'install')
+      && parts[2] === '-g' && /^openclaw(@[\w.-]+)?$/.test(parts[3] || '')) {
+    return { valid: true, argv: ['npm', parts[1], '-g', parts[3]] };
   }
 
   // Safe system commands
@@ -926,7 +597,7 @@ function parseTerminalCmd(cmdStr) {
   };
   if (sysMap[base]) return { valid: true, argv: sysMap[base]() };
 
-  return { valid: false, error: 'Command not allowed. Use: docker compose ..., openclaw ..., df, free, uptime, ps, date' };
+  return { valid: false, error: 'Command not allowed. Use: systemctl ..., journalctl ..., openclaw ..., npm update -g openclaw, df, free, uptime, ps, date' };
 }
 
 // --- Route matching ---
@@ -1012,15 +683,14 @@ const PROVIDERS = {
     authProfileProvider: 'openai',
     configTemplate: `${TEMPLATES_DIR}/openai.json`,
     knownModels: [
+      { id: 'gpt-5.5', name: 'GPT-5.5' },
+      { id: 'gpt-5.5-pro', name: 'GPT-5.5 Pro' },
       { id: 'gpt-5.4', name: 'GPT-5.4' },
-      { id: 'gpt-5.4-pro-2026-03-05', name: 'GPT-5.4 Pro' },
-      { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
+      { id: 'gpt-5.4-pro', name: 'GPT-5.4 Pro' },
+      { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini' },
+      { id: 'gpt-5.4-nano', name: 'GPT-5.4 Nano' },
       { id: 'gpt-4.1', name: 'GPT-4.1' },
       { id: 'gpt-4.1-mini', name: 'GPT-4.1 Mini' },
-      { id: 'gpt-4.1-nano', name: 'GPT-4.1 Nano' },
-      { id: 'o3', name: 'o3' },
-      { id: 'o3-pro', name: 'o3 Pro' },
-      { id: 'o3-mini', name: 'o3 Mini' },
       { id: 'o4-mini', name: 'o4-mini' }
     ],
     testFn: (apiKey) => testBearerModels('https://api.openai.com/v1/models', apiKey)
@@ -1028,19 +698,23 @@ const PROVIDERS = {
   'openai-codex': {
     name: 'ChatGPT OAuth (Codex)',
     envKey: null,              // No API key — uses OAuth token from auth-profiles.json
-    authProfileProvider: 'openai-codex',
+    authProfileProvider: 'openai', // 2026.6.8 unified ChatGPT OAuth under "openai"
     configTemplate: `${TEMPLATES_DIR}/openai-codex.json`,
     oauthOnly: true,           // Requires ChatGPT OAuth, no API key support
+    // Model IDs use the "openai/" prefix (unified provider). Synced with OpenClaw 2026.9.4
+    // (extensions/openai/model-route-contract.ts OPENAI_CHATGPT_MODERN_MODEL_IDS).
+    // Default kept at openai/gpt-5.5: gpt-6-astra access is still rolling out and OpenClaw
+    // does not fall back automatically. GPT-5.4 / 5.4-Mini are retired from the ChatGPT route
+    // (doctor --fix rewrites them to 5.6-terra / 5.6-luna); legacy gpt-5.x-codex ids dropped.
     knownModels: [
-      { id: 'openai-codex/gpt-5.4',            name: 'GPT-5.4',          default: true },
-      { id: 'openai-codex/gpt-5.4-mini',        name: 'GPT-5.4-Mini' },
-      { id: 'openai-codex/gpt-5.3-codex',       name: 'GPT-5.3-Codex' },
-      { id: 'openai-codex/gpt-5.3-codex-spark', name: 'GPT-5.3-Codex-Spark' },
-      { id: 'openai-codex/gpt-5.2-codex',       name: 'GPT-5.2-Codex' },
-      { id: 'openai-codex/gpt-5.2',             name: 'GPT-5.2' },
-      { id: 'openai-codex/gpt-5.1-codex-max',   name: 'GPT-5.1-Codex-Max' },
-      { id: 'openai-codex/gpt-5.1-codex-mini',  name: 'GPT-5.1-Codex-Mini' },
-      { id: 'openai-codex/gpt-5.1',             name: 'GPT-5.1' }
+      { id: 'openai/gpt-5.5',              name: 'GPT-5.5',            default: true },
+      { id: 'openai/gpt-6-astra',          name: 'GPT-6 Astra' },
+      { id: 'openai/gpt-5.6-sol',          name: 'GPT-5.6 Sol' },
+      { id: 'openai/gpt-5.6-terra',        name: 'GPT-5.6 Terra' },
+      { id: 'openai/gpt-5.6-luna',         name: 'GPT-5.6 Luna' },
+      { id: 'openai/gpt-5.5-pro',          name: 'GPT-5.5 Pro' },
+      { id: 'openai/gpt-5.4-pro',          name: 'GPT-5.4 Pro' },
+      { id: 'openai/gpt-5.3-codex-spark',  name: 'GPT-5.3-Codex-Spark' }
     ],
     testFn: () => false  // OAuth token — cannot test with static key
   },
@@ -1209,198 +883,43 @@ const CHANNEL_MAP = {
 };
 
 // =============================================================================
-// ChatGPT OAuth (OpenAI Codex) — PKCE OAuth 2.0 Helpers
-// Constants extracted from @mariozechner/pi-ai/dist/utils/oauth/openai-codex.js
+// ChatGPT OAuth (OpenAI Codex) — OAuth 2.0 Helpers
+// Constants verified against OpenClaw 2026.6.8 dist (openai-chatgpt-device-code.ts)
 // =============================================================================
-const OPENAI_OAUTH_CLIENT_ID  = 'app_EMoamEEZ73f0CkXaXp7hrann';
-const OPENAI_OAUTH_TOKEN_URL  = 'https://auth.openai.com/oauth/token';
-const OPENAI_OAUTH_AUTH_URL   = 'https://auth.openai.com/oauth/authorize';
-const OPENAI_OAUTH_REDIRECT   = 'http://localhost:1455/auth/callback';
-const OPENAI_OAUTH_SCOPE      = 'openid profile email offline_access';
-const OPENAI_OAUTH_PROFILE    = 'openai-codex'; // provider key used by openclaw
+const OPENAI_OAUTH_CLIENT_ID   = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const OPENAI_OAUTH_BASE_URL    = 'https://auth.openai.com';
+const OPENAI_OAUTH_TOKEN_URL   = `${OPENAI_OAUTH_BASE_URL}/oauth/token`;
+const OPENAI_OAUTH_AUTH_URL    = `${OPENAI_OAUTH_BASE_URL}/oauth/authorize`;
+const OPENAI_OAUTH_REDIRECT    = 'http://localhost:1455/auth/callback'; // PKCE redirect (browser flow)
+const OPENAI_OAUTH_SCOPE       = 'openid profile email offline_access';
+
+// Device-code flow (no browser on server — verified OpenClaw 2026.6.8)
+const OPENAI_DEVICE_USERCODE_URL = `${OPENAI_OAUTH_BASE_URL}/api/accounts/deviceauth/usercode`;
+const OPENAI_DEVICE_TOKEN_URL    = `${OPENAI_OAUTH_BASE_URL}/api/accounts/deviceauth/token`;
+const OPENAI_DEVICE_VERIFY_URL   = `${OPENAI_OAUTH_BASE_URL}/codex/device`;
+const OPENAI_DEVICE_CALLBACK_URL = `${OPENAI_OAUTH_BASE_URL}/deviceauth/callback`;
+const OPENAI_DEVICE_TIMEOUT_MS   = 15 * 60 * 1000;
+const OPENAI_DEVICE_DEFAULT_INTERVAL_MS = 5000;
+const OPENAI_DEVICE_MIN_INTERVAL_MS     = 1000;
+
+// Provider key used by OpenClaw. 2026.6.8 unified ChatGPT OAuth under "openai"
+// (legacy "openai-codex" is migrated by `openclaw doctor --fix`).
+const OPENAI_OAUTH_PROFILE      = 'openai';
+const OPENAI_OAUTH_LEGACY_KEYS  = ['openai-codex', 'openai:oauth']; // old profile prefixes to clean up
+const OPENAI_CODEX_DEFAULT_MODEL = 'openai/gpt-5.5';
+
+// Curl header args OpenClaw sends to the auth endpoints (originator identifies the client).
+// Returns a shell-ready string, e.g. -H 'originator: openclaw' -H 'User-Agent: openclaw'
+function openaiOAuthHeaderArgs() {
+  const version = (process.env.OPENCLAW_VERSION || '').trim();
+  const ua = version ? `openclaw/${version}` : 'openclaw';
+  return `-H 'originator: openclaw' -H 'User-Agent: ${ua}'`;
+}
 
 function pkceVerifier() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
-// --- Docker compose helpers ---
-function dockerCompose(cmd, timeout = 60000) {
-  return shell(`${COMPOSE_CMD} ${cmd}`, timeout);
-}
-
-function dockerExec(cmd, timeout = 30000) {
-  return shell(`${COMPOSE_CMD} exec -T openclaw ${cmd}`, timeout);
-}
-
-function dockerExecArgs(args, timeout = 30000) {
-  return execFileSync(
-    'docker',
-    ['compose', '-f', `${COMPOSE_DIR}/docker-compose.yml`, 'exec', '-T', 'openclaw', ...args],
-    { timeout, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }
-  ).trim();
-}
-
-function parseLooseValue(value) {
-  if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  if (trimmed === '') return trimmed;
-  if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  if (trimmed === 'null') return null;
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try { return JSON.parse(trimmed); } catch {}
-  }
-  return trimmed;
-}
-
-function normalizeGatewayParams(input = {}) {
-  const out = {};
-  for (const [key, value] of Object.entries(input || {})) {
-    if (value === undefined) continue;
-    if (typeof value === 'string' && value.trim() === '') continue;
-    out[key] = Array.isArray(value) ? value.map(parseLooseValue) : parseLooseValue(value);
-  }
-  return out;
-}
-
-function parseCliJsonOutput(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch {}
-
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    try { return JSON.parse(lines[i]); } catch {}
-  }
-  return { raw: text };
-}
-
-function gatewayMethod(method, params = {}, options = {}) {
-  const normalizedParams = normalizeGatewayParams(params);
-  const timeoutMs = Number(options.timeoutMs || 30000);
-  const execTimeout = Math.max(timeoutMs + 5000, 15000);
-  const args = ['node', 'dist/index.js', 'gateway', 'call', method, '--params', JSON.stringify(normalizedParams), '--json'];
-  if (options.expectFinal) args.push('--expect-final');
-  if (timeoutMs) args.push('--timeout', String(timeoutMs));
-  const output = dockerExecArgs(args, execTimeout);
-  return parseCliJsonOutput(output);
-}
-
-function openclawCli(args = [], options = {}) {
-  const timeoutMs = Number(options.timeoutMs || 30000);
-  const output = dockerExecArgs(['node', 'dist/index.js', ...args], Math.max(timeoutMs, 15000));
-  return options.json ? parseCliJsonOutput(output) : output;
-}
-
-function collectNestedValuesByKey(value, keyName, results = []) {
-  if (Array.isArray(value)) {
-    for (const item of value) collectNestedValuesByKey(item, keyName, results);
-    return results;
-  }
-  if (!isPlainObject(value)) return results;
-  for (const [key, item] of Object.entries(value)) {
-    if (key === keyName) results.push(item);
-    collectNestedValuesByKey(item, keyName, results);
-  }
-  return results;
-}
-
-function validateZaloConfigInput(value) {
-  const errors = [];
-  if (!isPlainObject(value)) {
-    return ['Zalo config patch must be an object'];
-  }
-
-  for (const webhookUrl of collectNestedValuesByKey(value, 'webhookUrl')) {
-    if (webhookUrl === null || webhookUrl === undefined || webhookUrl === '') continue;
-    if (typeof webhookUrl !== 'string' || !/^https:\/\//i.test(webhookUrl.trim())) {
-      errors.push('Zalo webhookUrl must use HTTPS');
-      break;
-    }
-  }
-
-  for (const webhookSecret of collectNestedValuesByKey(value, 'webhookSecret')) {
-    if (webhookSecret === null || webhookSecret === undefined || webhookSecret === '') continue;
-    if (typeof webhookSecret !== 'string' || webhookSecret.length < 8 || webhookSecret.length > 256) {
-      errors.push('Zalo webhookSecret must be 8-256 characters');
-      break;
-    }
-  }
-
-  for (const mediaMaxMb of collectNestedValuesByKey(value, 'mediaMaxMb')) {
-    if (mediaMaxMb === null || mediaMaxMb === undefined || mediaMaxMb === '') continue;
-    const parsed = Number(mediaMaxMb);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      errors.push('Zalo mediaMaxMb must be a positive number');
-      break;
-    }
-  }
-
-  const dmPolicies = collectNestedValuesByKey(value, 'dmPolicy');
-  for (const dmPolicy of dmPolicies) {
-    if (dmPolicy === null || dmPolicy === undefined || dmPolicy === '') continue;
-    if (!['pairing', 'allowlist', 'open', 'disabled'].includes(String(dmPolicy))) {
-      errors.push('Zalo dmPolicy must be one of: pairing, allowlist, open, disabled');
-      break;
-    }
-  }
-
-  const groupPolicies = collectNestedValuesByKey(value, 'groupPolicy');
-  for (const groupPolicy of groupPolicies) {
-    if (groupPolicy === null || groupPolicy === undefined || groupPolicy === '') continue;
-    if (!['allowlist', 'open', 'disabled'].includes(String(groupPolicy))) {
-      errors.push('Zalo groupPolicy must be one of: allowlist, open, disabled');
-      break;
-    }
-  }
-
-  return errors;
-}
-
-function buildZaloChannelState() {
-  const config = readConfig();
-  const channelConfig = deepClone(config?.channels?.zalo || {});
-  const envToken = getEnvValue('ZALO_BOT_TOKEN');
-  const defaultAccountToken = getValueAtPath(channelConfig, 'accounts.default.botToken');
-  const defaultAccountDmPolicy = getValueAtPath(channelConfig, 'accounts.default.dmPolicy');
-  const webhookUrls = collectNestedValuesByKey(channelConfig, 'webhookUrl').filter(value => typeof value === 'string' && value.trim());
-  const webhookPaths = collectNestedValuesByKey(channelConfig, 'webhookPath').filter(value => typeof value === 'string' && value.trim());
-  const accountIds = isPlainObject(channelConfig.accounts) ? Object.keys(channelConfig.accounts) : [];
-  const effectiveToken = typeof channelConfig.botToken === 'string'
-    ? channelConfig.botToken
-    : (defaultAccountToken.exists && typeof defaultAccountToken.value === 'string' ? defaultAccountToken.value : envToken);
-
-  return {
-    plugin: {
-      required: true,
-      package: '@openclaw/zalo',
-      enabled: !!config?.plugins?.entries?.zalo?.enabled
-    },
-    env: {
-      botToken: envToken ? sanitizeKey(envToken) : null
-    },
-    config: redactSensitiveData(channelConfig),
-    summary: {
-      enabled: !!channelConfig.enabled,
-      configured: !!effectiveToken,
-      transportMode: webhookUrls.length > 0 ? 'webhook' : 'polling',
-      webhookConfigured: webhookUrls.length > 0,
-      webhookPaths,
-      accountIds,
-      defaultDmPolicy: defaultAccountDmPolicy.exists ? defaultAccountDmPolicy.value : (channelConfig.dmPolicy || 'pairing'),
-      mediaMaxMb: channelConfig.mediaMaxMb || 5,
-      groupSupport: 'marketplace-bot-not-available'
-    },
-    notes: {
-      experimental: true,
-      dmPairingDefault: true,
-      groupsSupported: false,
-      textChunkLimit: 2000,
-      streamingBlockedByDefault: true,
-      webhookRequiresHttps: true
-    }
-  };
-}
 function pkceChallenge(verifier) {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
@@ -1440,32 +959,36 @@ function exchangeOAuthCode(code, codeVerifier) {
 
 // Store OAuth tokens in auth-profiles.json using openclaw's exact credential format
 // Fields: { type, provider, access, refresh, expires (ms), accountId }
-// Profile key: "openai-codex:<email|default>"
+// Profile key: "openai:<email|default>" (2026.6.8 unified naming)
 function storeOAuthTokens(tokens, agentId = 'main') {
   const data = readAgentAuth(agentId);
   data.profiles = data.profiles || {};
 
-  // Extract accountId and email from JWT
-  const JWT_CLAIM = 'https://api.openai.com/auth';
+  // Extract accountId and email from JWT (verified claim paths, OpenClaw 2026.6.8)
   const payload = decodeJwtPayload(tokens.access);
-  const accountId = payload?.[JWT_CLAIM]?.chatgpt_account_id || null;
-  const email = (typeof payload?.email === 'string' && payload.email.trim()) ? payload.email.trim() : null;
+  const auth = payload?.['https://api.openai.com/auth'];
+  const accountId = auth?.chatgpt_account_id || null;
+  const rawEmail = payload?.['https://api.openai.com/profile']?.email;
+  const email = (typeof rawEmail === 'string' && rawEmail.trim()) ? rawEmail.trim() : null;
 
   const profileKey = `${OPENAI_OAUTH_PROFILE}:${email || 'default'}`;
 
-  // Remove any old profile keys for this provider
+  // Remove any old OAuth profile keys for this provider (current + legacy prefixes).
+  // Keep api_key profiles (e.g. "openai:manual") so OAuth doesn't clobber a stored key.
   for (const k of Object.keys(data.profiles)) {
-    if (k.startsWith(`${OPENAI_OAUTH_PROFILE}:`)) delete data.profiles[k];
+    const v = data.profiles[k];
+    const isOAuthForOpenai =
+      k.startsWith(`${OPENAI_OAUTH_PROFILE}:`) && v && v.type === 'oauth';
+    const isLegacy = OPENAI_OAUTH_LEGACY_KEYS.some(p => k === p || k.startsWith(`${p}:`));
+    if (isOAuthForOpenai || isLegacy) delete data.profiles[k];
   }
-  // Also remove old incorrect key from previous management API versions
-  delete data.profiles['openai:oauth'];
 
   data.profiles[profileKey] = {
     type: 'oauth',
     provider: OPENAI_OAUTH_PROFILE,
     access: tokens.access,
     refresh: tokens.refresh,
-    expires: tokens.expires,  // milliseconds (Date.now() + expires_in*1000)
+    expires: tokens.expires,  // milliseconds epoch (Date.now() + expires_in*1000)
     accountId
   };
   writeAgentAuth(agentId, data);
@@ -1501,38 +1024,132 @@ function refreshOAuthToken(refreshToken) {
   }
 }
 
-// Get stored OAuth profile for an agent (searches for openai-codex:* key)
-function getOAuthProfile(agentId = 'main') {
-  const data = readAgentAuth(agentId);
-  const profiles = data.profiles || {};
-  for (const [k, v] of Object.entries(profiles)) {
-    if (k.startsWith(`${OPENAI_OAUTH_PROFILE}:`) && v && v.access) return { key: k, ...v };
+// =============================================================================
+// Device-code OAuth flow (RFC 8628 style) — verified against OpenClaw 2026.6.8
+// Ideal for headless VPS: user enters a short code on any device, no copy-paste.
+// =============================================================================
+
+// POST /api/accounts/deviceauth/usercode → { device_auth_id, user_code, interval }
+function requestDeviceCode() {
+  const tmpFile = `/tmp/openclaw-devcode-${crypto.randomBytes(8).toString('hex')}.json`;
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify({ client_id: OPENAI_OAUTH_CLIENT_ID }), 'utf8');
+    const result = shell(
+      `curl -sf --max-time 20 -X POST '${OPENAI_DEVICE_USERCODE_URL}' \
+        -H 'Content-Type: application/json' ${openaiOAuthHeaderArgs()} \
+        --data-binary @${tmpFile}`,
+      25000
+    );
+    const body = JSON.parse(result);
+    const deviceAuthId = body?.device_auth_id;
+    const userCode = body?.user_code || body?.usercode;
+    if (!deviceAuthId || !userCode) {
+      throw new Error('Device code response missing device_auth_id or user_code');
+    }
+    const intervalSec = Number(body?.interval);
+    const intervalMs = Number.isFinite(intervalSec) && intervalSec > 0
+      ? Math.max(intervalSec * 1000, OPENAI_DEVICE_MIN_INTERVAL_MS)
+      : OPENAI_DEVICE_DEFAULT_INTERVAL_MS;
+    return { deviceAuthId, userCode, intervalMs, verificationUrl: OPENAI_DEVICE_VERIFY_URL };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
   }
-  return null;
 }
 
-// Attempt to refresh tokens for a single agent. Returns 'refreshed' | 'skipped' | 'error'
-function tryRefreshAgent(agentId) {
+// One poll attempt against /api/accounts/deviceauth/token.
+// Returns { status: 'pending' } while user hasn't approved (HTTP 403/404),
+// { status: 'ready', authorizationCode, codeVerifier } on success,
+// or throws on a hard error.
+function pollDeviceCodeOnce(deviceAuthId, userCode) {
+  const tmpFile = `/tmp/openclaw-devpoll-${crypto.randomBytes(8).toString('hex')}.json`;
   try {
-    const profile = getOAuthProfile(agentId);
-    if (!profile || !profile.refresh) return 'skipped';
-
-    const now = Date.now();
-    // expires is in milliseconds; refresh if < 10 min remaining or expired
-    const needsRefresh = !profile.expires || (profile.expires - now) < 600000;
-    if (!needsRefresh) return 'skipped';
-
-    const tokens = refreshOAuthToken(profile.refresh);
-    if (!tokens || !tokens.access) return 'error';
-
-    storeOAuthTokens(tokens, agentId);
-    const remaining = tokens.expires ? Math.round((tokens.expires - Date.now()) / 1000) : '?';
-    console.log(`[OAuth] Refreshed token for agent "${agentId}" (expires in ${remaining}s)`);
-    return 'refreshed';
-  } catch (e) {
-    console.error(`[OAuth] Auto-refresh failed for agent "${agentId}": ${e.message}`);
-    return 'error';
+    fs.writeFileSync(tmpFile, JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }), 'utf8');
+    // -w appends HTTP status so we can distinguish pending (403/404) from success.
+    const raw = shell(
+      `curl -s --max-time 20 -X POST '${OPENAI_DEVICE_TOKEN_URL}' \
+        -H 'Content-Type: application/json' ${openaiOAuthHeaderArgs()} \
+        -w '\\n%{http_code}' \
+        --data-binary @${tmpFile}`,
+      25000
+    );
+    const idx = raw.lastIndexOf('\n');
+    const status = parseInt(raw.slice(idx + 1).trim(), 10);
+    const bodyText = raw.slice(0, idx).trim();
+    if (status === 200) {
+      const body = JSON.parse(bodyText || '{}');
+      const authorizationCode = body?.authorization_code;
+      const codeVerifier = body?.code_verifier;
+      if (!authorizationCode || !codeVerifier) {
+        throw new Error('Device authorization response missing exchange code');
+      }
+      return { status: 'ready', authorizationCode, codeVerifier };
+    }
+    if (status === 403 || status === 404) return { status: 'pending' };
+    let detail = bodyText;
+    try { const b = JSON.parse(bodyText); detail = b.error_description || b.error || bodyText; } catch {}
+    throw new Error(`Device authorization failed (HTTP ${status}): ${detail}`);
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
   }
+}
+
+// Exchange the device authorization_code + code_verifier for OAuth tokens.
+// Returns { access, refresh, expires (ms) } normalized for storeOAuthTokens.
+function exchangeDeviceCode(authorizationCode, codeVerifier) {
+  const tmpFile = `/tmp/openclaw-devexch-${crypto.randomBytes(8).toString('hex')}.dat`;
+  try {
+    const params = [
+      `grant_type=authorization_code`,
+      `client_id=${encodeURIComponent(OPENAI_OAUTH_CLIENT_ID)}`,
+      `code=${encodeURIComponent(authorizationCode)}`,
+      `code_verifier=${encodeURIComponent(codeVerifier)}`,
+      `redirect_uri=${encodeURIComponent(OPENAI_DEVICE_CALLBACK_URL)}`
+    ].join('&');
+    fs.writeFileSync(tmpFile, params, 'utf8');
+    const result = shell(
+      `curl -sf --max-time 30 -X POST '${OPENAI_OAUTH_TOKEN_URL}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' ${openaiOAuthHeaderArgs()} \
+        --data-binary @${tmpFile}`,
+      35000
+    );
+    const raw = JSON.parse(result);
+    if (!raw.access_token) return null;
+    return {
+      access: raw.access_token,
+      refresh: raw.refresh_token,
+      expires: typeof raw.expires_in === 'number' ? Date.now() + raw.expires_in * 1000 : null
+    };
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch {}
+  }
+}
+
+// Get stored OAuth profile for an agent.
+// Reads the unified "openai:*" key (2026.6.8) and legacy "openai-codex:*"/"openai:oauth"
+// keys for backward compatibility. Only returns profiles with type "oauth".
+// Merge JSON + SQLite profiles. SQLite wins (doctor imports JSON→SQLite then
+// empties the JSON), but JSON is still read so freshly-stored tokens show up
+// before the next doctor run.
+function readAllProfiles(agentId = 'main') {
+  const fromJson = (readAgentAuth(agentId).profiles) || {};
+  const fromSqlite = readSqliteProfiles(agentId);
+  return fromSqlite ? { ...fromJson, ...fromSqlite } : fromJson;
+}
+
+// List ALL OpenAI OAuth profiles (one per connected ChatGPT account).
+function listOAuthProfiles(agentId = 'main') {
+  const profiles = readAllProfiles(agentId);
+  const prefixes = [OPENAI_OAUTH_PROFILE, ...OPENAI_OAUTH_LEGACY_KEYS];
+  const out = [];
+  for (const [k, v] of Object.entries(profiles)) {
+    if (!v || !v.access || v.type !== 'oauth') continue;
+    if (prefixes.some(p => k === p || k.startsWith(`${p}:`))) out.push({ key: k, ...v });
+  }
+  return out;
+}
+
+function getOAuthProfile(agentId = 'main') {
+  return listOAuthProfiles(agentId)[0] || null;
 }
 
 // Cleanup expired OAuth sessions
@@ -1543,39 +1160,228 @@ function pruneOAuthSessions() {
   }
 }
 
-// --- Docker compose helpers ---
-function dockerCompose(cmd, timeout = 60000) {
-  return shell(`${COMPOSE_CMD} ${cmd}`, timeout);
+// Set agents.defaults.model.primary in config and restart OpenClaw.
+// Shared by both OAuth flows (device-code + PKCE). Returns the model written.
+function applyOAuthModel(model) {
+  const finalModel = model || OPENAI_CODEX_DEFAULT_MODEL;
+  let config;
+  try { config = readConfig(); } catch { config = {}; }
+  if (!config.agents) config.agents = { defaults: { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } } };
+  if (!config.agents.defaults) config.agents.defaults = { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } };
+  if (!config.agents.defaults.model) config.agents.defaults.model = {};
+  config.agents.defaults.model.primary = finalModel;
+  writeConfig(config);
+  return finalModel;
 }
 
-function dockerExec(cmd, timeout = 30000) {
-  return shell(`${COMPOSE_CMD} exec -T openclaw ${cmd}`, timeout);
-}
+// `openclaw doctor` non-interactive: --fix (alias --repair) applies safe repairs,
+// --yes/--non-interactive avoid prompts (e.g. "Repair legacy auth-profiles.json?").
+// This is how written auth-profiles.json gets loaded into the SQLite auth store.
+const DOCTOR_CMD = 'doctor --fix --yes --non-interactive';
 
-function getContainerStatus() {
+// OpenClaw >= 2026.9: doctor can giu rieng state DB, gateway dang chay ->
+// GatewayStateOwnerContentionError ("state database is busy"), credential ket o
+// auth-profiles.json. Dung gateway truoc, luon start lai (ke ca khi doctor loi).
+function doctorFix() {
+  try { systemctl('stop', OPENCLAW_SERVICE, 60000); } catch {}
   try {
-    const out = shell(`docker inspect openclaw --format '{{.State.Status}} {{.State.StartedAt}}' 2>/dev/null`);
-    const [status, startedAt] = out.split(' ');
-    return { status, startedAt };
+    return openclawExec(DOCTOR_CMD, 120000);
+  } finally {
+    try { systemctl('start', OPENCLAW_SERVICE, 60000); } catch {}
+  }
+}
+
+// Migrate the JSON auth profiles we wrote into OpenClaw's SQLite auth store.
+// OpenClaw 2026.6.x reads credentials from openclaw-agent.sqlite at runtime, NOT
+// from auth-profiles.json, so doctor must import them. Returns true on success.
+function migrateAuthToSqlite() {
+  try {
+    const out = doctorFix();
+    console.log('[OAuth] doctor migrate:', out.slice(-1500));
+    return true;
+  } catch (e) {
+    console.error('[OAuth] doctor migrate failed:', e.message);
+    return false;
+  }
+}
+
+// After writing tokens to auth-profiles.json, import them into SQLite; doctorFix()
+// starts OpenClaw again so it picks up the new credentials. Shared by all OAuth paths.
+function finalizeAuth() {
+  migrateAuthToSqlite();
+}
+
+// Background poll loop for a device-code session. Drives one session to terminal
+// state ('ready' → tokens stored, or 'error'/'expired'). Self-schedules.
+function pollDeviceSession(sessionId) {
+  const s = _deviceSessions[sessionId];
+  if (!s || s.status !== 'pending') return;
+
+  if (Date.now() >= s.deadline) {
+    s.status = 'expired';
+    s.error = 'Device authorization timed out. Start a new session.';
+    return;
+  }
+
+  let outcome;
+  try {
+    outcome = pollDeviceCodeOnce(s.deviceAuthId, s.userCode);
+  } catch (e) {
+    s.status = 'error';
+    s.error = e.message;
+    return;
+  }
+
+  if (outcome.status === 'pending') {
+    s.timer = setTimeout(() => pollDeviceSession(sessionId), s.intervalMs);
+    return;
+  }
+
+  // outcome.status === 'ready' → exchange code for tokens, store, switch model
+  try {
+    const tokens = exchangeDeviceCode(outcome.authorizationCode, outcome.codeVerifier);
+    if (!tokens || !tokens.access) throw new Error('Token exchange returned no access token');
+
+    const stored = storeOAuthTokens(tokens, s.agentId);
+    let switchedModel = null;
+    if (s.switchProvider !== false) {
+      try { switchedModel = applyOAuthModel(s.model); }
+      catch (e) { s.switchError = e.message; }
+    }
+    // Import tokens into SQLite auth store, then restart OpenClaw.
+    finalizeAuth();
+
+    s.status = 'ready';
+    s.result = {
+      agentId: s.agentId,
+      profileKey: stored.profileKey,
+      accountId: stored.accountId,
+      email: stored.email,
+      switchedProvider: s.switchProvider !== false && !s.switchError,
+      model: switchedModel,
+      switchError: s.switchError || undefined,
+      expiresAt: tokens.expires || null
+    };
+    console.log(`[OAuth] Device-code login complete for agent "${s.agentId}" (${stored.email || stored.profileKey})`);
+  } catch (e) {
+    s.status = 'error';
+    s.error = 'Token exchange failed: ' + e.message;
+  }
+}
+
+// Cleanup finished/expired device sessions (older than TTL past creation).
+function pruneDeviceSessions() {
+  const now = Date.now();
+  for (const id of Object.keys(_deviceSessions)) {
+    const s = _deviceSessions[id];
+    const expired = now - s.createdAt > (OPENAI_DEVICE_TIMEOUT_MS + 2 * 60 * 1000);
+    if (expired) {
+      if (s.timer) clearTimeout(s.timer);
+      delete _deviceSessions[id];
+    }
+  }
+}
+
+// --- Systemd / bare-metal helpers ---
+function systemctl(action, service = OPENCLAW_SERVICE, timeout = 30000) {
+  return shell(`systemctl ${action} ${service}`, timeout);
+}
+
+function openclawExec(cmd, timeout = 30000) {
+  return shell(`HOME=${COMPOSE_DIR} ${OPENCLAW_BIN} ${cmd}`, timeout);
+}
+
+function getServiceStatus(service = OPENCLAW_SERVICE) {
+  try {
+    let active;
+    try {
+      active = shell(`systemctl is-active ${service} 2>/dev/null`).trim();
+    } catch (e) {
+      // systemctl is-active exits non-zero for inactive/failed states
+      const out = e.stdout ? e.stdout.toString().trim() : '';
+      active = out || 'inactive';
+    }
+    let startedAt = null;
+    try {
+      const ts = shell(`systemctl show ${service} -p ActiveEnterTimestamp --value 2>/dev/null`).trim();
+      if (ts) startedAt = new Date(ts).toISOString();
+    } catch {}
+    const statusMap = { active: 'running', inactive: 'exited', failed: 'exited', activating: 'restarting' };
+    return { status: statusMap[active] || active, startedAt };
   } catch {
     return { status: 'not_found', startedAt: null };
   }
 }
 
-function restartContainer(service = 'openclaw') {
-  dockerCompose(`up -d ${service}`, 60000);
-  dockerCompose(`restart ${service}`, 60000);
+function restartService(service = OPENCLAW_SERVICE) {
+  systemctl('restart', service, 60000);
 }
 
 // =============================================================================
 // On-demand device auto-approve polling (activated by /pair endpoint)
+// Reads/writes device JSON files directly — no CLI/gateway needed
 // =============================================================================
+const DEVICES_DIR = `${CONFIG_DIR}/devices`;
+const PENDING_FILE = `${DEVICES_DIR}/pending.json`;
+const PAIRED_FILE = `${DEVICES_DIR}/paired.json`;
+
 let _devicePollUntil = 0;
 let _devicePollTimer = null;
+
+function approveAllPendingDevices() {
+  try {
+    if (!fs.existsSync(PENDING_FILE)) return 0;
+    const pending = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+    const keys = Object.keys(pending);
+    if (keys.length === 0) return 0;
+
+    let paired = {};
+    try { paired = JSON.parse(fs.readFileSync(PAIRED_FILE, 'utf8')); } catch {}
+
+    let approved = 0;
+    const now = Date.now();
+    for (const key of keys) {
+      const device = pending[key];
+      const deviceId = device.deviceId || key;
+      paired[deviceId] = {
+        ...device,
+        approvedScopes: device.scopes || [],
+        tokens: {
+          [device.role || 'operator']: {
+            token: crypto.randomBytes(32).toString('base64url'),
+            role: device.role || 'operator',
+            scopes: device.scopes || [],
+            createdAtMs: now
+          }
+        },
+        createdAtMs: device.ts || now,
+        approvedAtMs: now
+      };
+      delete paired[deviceId].requestId;
+      delete paired[deviceId].ts;
+      delete paired[deviceId].silent;
+      delete paired[deviceId].isRepair;
+      console.log(`[Devices] Auto-approved: ${deviceId}`);
+      approved++;
+    }
+
+    if (approved > 0) {
+      fs.mkdirSync(DEVICES_DIR, { recursive: true });
+      fs.writeFileSync(PAIRED_FILE, JSON.stringify(paired, null, 2), 'utf8');
+      fs.writeFileSync(PENDING_FILE, '{}', 'utf8');
+    }
+    return approved;
+  } catch (e) {
+    console.error(`[Devices] approve error: ${e.message}`);
+    return 0;
+  }
+}
 
 function startDevicePoll() {
   if (_devicePollTimer) return;
   console.log('[Devices] Polling activated');
+  // Approve immediately on first call
+  approveAllPendingDevices();
   _devicePollTimer = setInterval(() => {
     if (Date.now() > _devicePollUntil) {
       clearInterval(_devicePollTimer);
@@ -1583,22 +1389,7 @@ function startDevicePoll() {
       console.log('[Devices] Polling stopped (timeout)');
       return;
     }
-    try {
-      const output = execSync(
-        'docker exec openclaw node dist/index.js devices list --json 2>&1',
-        { encoding: 'utf8', timeout: 15000 }
-      );
-      const jsonMatch = output.trim().match(/\{[\s\S]*\}$/);
-      if (!jsonMatch) return;
-      const data = JSON.parse(jsonMatch[0]);
-      const pending = (data.pending || []).filter(d => d.requestId);
-      for (const d of pending) {
-        try {
-          execSync(`docker exec openclaw node dist/index.js devices approve ${d.requestId} 2>&1`, { timeout: 15000 });
-          console.log(`[Devices] Auto-approved: ${d.deviceId} (${d.requestId})`);
-        } catch (e) { console.error(`[Devices] approve failed ${d.requestId}:`, e.message?.slice(0, 200)); }
-      }
-    } catch {}
+    approveAllPendingDevices();
   }, 5 * 1000);
 }
 
@@ -1614,13 +1405,8 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
-  // IP Whitelist check
-  // if (!ALLOWED_IPS.includes(ip)) {
-  //   return json(res, 403, { ok: false, error: 'Access denied' });
-  // }
-
-  // Rate limit
-  if (isBlocked(ip)) {
+  // Rate limit (whitelisted IPs bypass)
+  if (!isWhitelisted(ip) && isBlocked(ip)) {
     return json(res, 429, { ok: false, error: 'Too many failed attempts. Blocked for 15 minutes.' });
   }
 
@@ -1854,7 +1640,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const token = getEnvValue('OPENCLAW_GATEWAY_TOKEN') || '';
       const serverIP = getServerIP();
-      const { status } = getContainerStatus();
+      const { status } = getServiceStatus();
       // Domain from .env; fallback to legacy Caddyfile when .env has no DOMAIN
       const rawDomain = getConfiguredDomainRaw();
       const domain = rawDomain && !/^https?:\/\//.test(rawDomain) ? rawDomain : null;
@@ -1911,13 +1697,10 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'GET', '/api/status')) {
     try {
-      const { status, startedAt } = getContainerStatus();
+      const { status, startedAt } = getServiceStatus();
 
       // Caddy status
-      let caddyStatus = 'not_found';
-      try {
-        caddyStatus = shell("docker inspect caddy --format '{{.State.Status}}' 2>/dev/null");
-      } catch {}
+      const { status: caddyStatus } = getServiceStatus(CADDY_SERVICE);
 
       return json(res, 200, {
         ok: true,
@@ -1985,17 +1768,16 @@ const server = http.createServer(async (req, res) => {
 
       // Download latest Caddyfile template from repo
       try {
-        shell(`curl -fsSL 'https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/v2/Caddyfile?t=${Date.now()}' -o '${CADDYFILE}'`, 15000);
+        shell(`curl -fsSL 'https://raw.githubusercontent.com/hitechcloud-vietnam/vps-openclaw-management/main/Caddyfile?t=${Date.now()}' -o '${CADDYFILE}'`, 15000);
       } catch (dlErr) {
         return json(res, 500, { ok: false, error: 'Failed to download Caddyfile: ' + dlErr.message });
       }
 
-      // Restart Caddy container
+      // Restart Caddy service
       try {
-        dockerCompose('restart caddy', 30000);
-        // Wait and check
+        systemctl('restart', CADDY_SERVICE, 30000);
         execSync('sleep 3');
-        const caddyStatus = shell("docker inspect caddy --format '{{.State.Status}}' 2>/dev/null");
+        const { status: caddyStatus } = getServiceStatus(CADDY_SERVICE);
         if (caddyStatus === 'running') {
           return json(res, 200, { ok: true, domain });
         }
@@ -2004,7 +1786,7 @@ const server = http.createServer(async (req, res) => {
       // Rollback: revert domain to IP in .env
       setEnvValue('DOMAIN', `http://${serverIP}`);
       setEnvValue('CADDY_TLS', '');
-      try { dockerCompose('restart caddy', 15000); } catch {}
+      try { systemctl('restart', CADDY_SERVICE, 15000); } catch {}
       return json(res, 500, { ok: false, error: 'Caddy failed to start with this domain. Rolled back to IP config.' });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -2014,37 +1796,39 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'GET', '/api/version')) {
     try {
-      let currentImage = 'unknown';
+      let clawVersion = 'unknown';
       try {
-        currentImage = shell("docker inspect openclaw --format '{{.Config.Image}}' 2>/dev/null");
-      } catch {}
-
-      let currentDigest = 'unknown';
-      try {
-        currentDigest = shell("docker inspect openclaw --format '{{.Image}}' 2>/dev/null");
+        clawVersion = shell(`${OPENCLAW_BIN} --version 2>/dev/null`).trim();
       } catch {}
 
       return json(res, 200, {
         ok: true,
         version: getEnvValue('OPENCLAW_VERSION') || 'latest',
-        image: currentImage,
-        digest: currentDigest
+        clawVersion
       });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
   // =========================================================================
-  // POST /api/upgrade — Pull latest image + recreate
+  // POST /api/upgrade — Update openclaw to latest + migrate auth + restart
+  // Body: { doctor? } — run `openclaw doctor --fix` after upgrade (default: true)
+  // to migrate legacy auth profiles (openai-codex → openai) on schema changes.
+  // Uses `npm install -g` (not `update`) so date-based versions always move to latest.
   // =========================================================================
   if (route(req, 'POST', '/api/upgrade')) {
     try {
-      exec(`cd ${COMPOSE_DIR} && ${COMPOSE_CMD} pull openclaw && ${COMPOSE_CMD} up -d openclaw`,
+      const body = await parseBody(req).catch(() => ({}));
+      const runDoctor = body.doctor !== false;
+      ensureRealConfigDir();
+      exec(`npm install -g openclaw@latest`,
         { timeout: 300000 }, (err, stdout, stderr) => {
           console.log('[MGMT] Upgrade completed:', err ? 'FAILED' : 'OK');
           if (stdout) console.log(stdout);
           if (stderr) console.error(stderr);
+          if (runDoctor) migrateAuthToSqlite();
+          try { execSync(`systemctl restart ${OPENCLAW_SERVICE}`, { timeout: 30000 }); } catch {}
         });
-      return json(res, 202, { ok: true, message: 'Upgrade started. Check /api/status for progress.' });
+      return json(res, 202, { ok: true, message: 'Upgrade started (npm install + doctor --fix). Check /api/status for progress.' });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
@@ -2053,9 +1837,9 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'POST', '/api/restart')) {
     try {
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
       execSync('sleep 2');
-      const { status } = getContainerStatus();
+      const { status } = getServiceStatus();
       return json(res, 200, { ok: status === 'running', status });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -2065,7 +1849,7 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'POST', '/api/stop')) {
     try {
-      dockerCompose('stop openclaw');
+      systemctl('stop', OPENCLAW_SERVICE);
       return json(res, 200, { ok: true, message: 'OpenClaw stopped.' });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -2075,9 +1859,9 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'POST', '/api/start')) {
     try {
-      dockerCompose('start openclaw');
+      systemctl('start', OPENCLAW_SERVICE);
       execSync('sleep 2');
-      const { status } = getContainerStatus();
+      const { status } = getServiceStatus();
       return json(res, 200, { ok: status === 'running', status });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -2087,10 +1871,10 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'POST', '/api/rebuild')) {
     try {
-      dockerCompose('down', 60000);
-      dockerCompose('up -d', 120000);
+      restartService(OPENCLAW_SERVICE);
+      restartService(CADDY_SERVICE);
       execSync('sleep 3');
-      const { status } = getContainerStatus();
+      const { status } = getServiceStatus();
       return json(res, 200, { ok: status === 'running', status });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -2106,8 +1890,8 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { ok: false, error: 'Send {"confirm":"RESET"} to confirm destructive action.' });
       }
 
-      // Down all containers + remove volumes
-      dockerCompose('down -v', 60000);
+      // Stop services
+      systemctl('stop', OPENCLAW_SERVICE, 60000);
 
       // Keep .env but reset config and data
       try { execSync(`rm -rf ${CONFIG_DIR}/openclaw.json ${COMPOSE_DIR}/data`); } catch {}
@@ -2126,10 +1910,10 @@ const server = http.createServer(async (req, res) => {
         } catch {}
       }
 
-      // Bring everything back up
-      dockerCompose('up -d', 120000);
+      // Start service back up
+      systemctl('start', OPENCLAW_SERVICE, 120000);
       execSync('sleep 3');
-      const { status } = getContainerStatus();
+      const { status } = getServiceStatus();
 
       return json(res, 200, { ok: status === 'running', status, message: 'Reset complete. Config reverted to defaults.' });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -2144,698 +1928,18 @@ const server = http.createServer(async (req, res) => {
       const lines = Math.min(Math.max(parseInt(url.searchParams.get('lines')) || 100, 1), 1000);
       const service = url.searchParams.get('service') || 'openclaw';
 
-      const allowed = ['openclaw', 'caddy'];
+      const allowed = ['openclaw', 'caddy', 'openclaw-mgmt'];
       if (!allowed.includes(service)) {
         return json(res, 400, { ok: false, error: 'Invalid service. Allowed: ' + allowed.join(', ') });
       }
 
-      const logs = dockerCompose(`logs --tail=${lines} --no-color ${service}`, 15000);
+      let logs;
+      try {
+        logs = shell(`journalctl -u ${service} --no-pager -n ${lines} --no-hostname 2>&1`, 15000);
+      } catch (e) {
+        logs = e.stdout ? e.stdout.toString().trim() : (e.message || 'No logs available');
+      }
       return json(res, 200, { ok: true, service, lines, logs });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/health — Upstream health snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/health')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('health', params, { timeoutMs: Number(params.timeoutMs || params.timeout || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'health', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/gateway/status — Upstream status summary
-  // =========================================================================
-  if (route(req, 'GET', '/api/gateway/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('status', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/gateway/identity — Upstream gateway device identity
-  // =========================================================================
-  if (route(req, 'GET', '/api/gateway/identity')) {
-    try {
-      const result = gatewayMethod('gateway.identity.get', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'gateway.identity.get', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/heartbeat/last — Upstream last heartbeat event
-  // =========================================================================
-  if (route(req, 'GET', '/api/heartbeat/last')) {
-    try {
-      const result = gatewayMethod('last-heartbeat', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'last-heartbeat', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/heartbeat/enabled — Enable/disable upstream heartbeats
-  // =========================================================================
-  if (route(req, 'PUT', '/api/heartbeat/enabled')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('set-heartbeats', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'set-heartbeats', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/logs/tail — Upstream rolling log tail
-  // =========================================================================
-  if (route(req, 'GET', '/api/logs/tail')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('logs.tail', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'logs.tail', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/doctor/memory-status/upstream — Upstream memory doctor probe
-  // =========================================================================
-  if (route(req, 'GET', '/api/doctor/memory-status/upstream')) {
-    try {
-      const result = gatewayMethod('doctor.memory.status', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'doctor.memory.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/tts/status — Upstream TTS status
-  // =========================================================================
-  if (route(req, 'GET', '/api/tts/status')) {
-    try {
-      const result = gatewayMethod('tts.status', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'tts.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/tts/providers — Upstream TTS providers
-  // =========================================================================
-  if (route(req, 'GET', '/api/tts/providers')) {
-    try {
-      const result = gatewayMethod('tts.providers', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'tts.providers', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/tts/enable — Enable upstream TTS
-  // =========================================================================
-  if (route(req, 'POST', '/api/tts/enable')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('tts.enable', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'tts.enable', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/tts/disable — Disable upstream TTS
-  // =========================================================================
-  if (route(req, 'POST', '/api/tts/disable')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('tts.disable', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'tts.disable', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/tts/convert — Upstream text-to-speech conversion
-  // =========================================================================
-  if (route(req, 'POST', '/api/tts/convert')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('tts.convert', body, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'tts.convert', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/tts/provider — Upstream TTS provider selection
-  // =========================================================================
-  if (route(req, 'PUT', '/api/tts/provider')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('tts.setProvider', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'tts.setProvider', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/voicewake — Upstream voice wake triggers
-  // =========================================================================
-  if (route(req, 'GET', '/api/voicewake')) {
-    try {
-      const result = gatewayMethod('voicewake.get', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'voicewake.get', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/voicewake — Upstream voice wake trigger update
-  // =========================================================================
-  if (route(req, 'PUT', '/api/voicewake')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('voicewake.set', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'voicewake.set', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/wake — Upstream wake/cron poke
-  // =========================================================================
-  if (route(req, 'POST', '/api/wake')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('wake', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'wake', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/cron — Upstream cron list
-  // =========================================================================
-  if (route(req, 'GET', '/api/cron')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('cron.list', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'cron.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/cron/status — Upstream cron status
-  // =========================================================================
-  if (route(req, 'GET', '/api/cron/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('cron.status', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'cron.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/cron — Upstream cron create
-  // =========================================================================
-  if (route(req, 'POST', '/api/cron')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('cron.add', body, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'cron.add', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PATCH /api/cron/:id — Upstream cron update
-  // =========================================================================
-  if ((m = route(req, 'PATCH', '/api/cron/:id'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { id: m.params.id, ...body, patch: body.patch || body };
-      const result = gatewayMethod('cron.update', params, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'cron.update', id: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // DELETE /api/cron/:id — Upstream cron remove
-  // =========================================================================
-  if ((m = route(req, 'DELETE', '/api/cron/:id'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, id: m.params.id };
-      const result = gatewayMethod('cron.remove', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'cron.remove', id: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/cron/:id/run — Upstream cron run enqueue
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/cron/:id/run'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, id: m.params.id };
-      const result = gatewayMethod('cron.run', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'cron.run', id: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/cron/runs — Upstream cron run history
-  // =========================================================================
-  if (route(req, 'GET', '/api/cron/runs')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('cron.runs', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'cron.runs', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/devices/pairing — Upstream paired/pending devices
-  // =========================================================================
-  if (route(req, 'GET', '/api/devices/pairing')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('device.pair.list', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.pair.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/devices/pairing/approve — Upstream device pairing approve
-  // =========================================================================
-  if (route(req, 'POST', '/api/devices/pairing/approve')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('device.pair.approve', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.pair.approve', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/devices/pairing/reject — Upstream device pairing reject
-  // =========================================================================
-  if (route(req, 'POST', '/api/devices/pairing/reject')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('device.pair.reject', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.pair.reject', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // DELETE /api/devices/:id/pairing — Upstream paired device removal
-  // =========================================================================
-  if ((m = route(req, 'DELETE', '/api/devices/:id/pairing'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, deviceId: m.params.id };
-      const result = gatewayMethod('device.pair.remove', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.pair.remove', deviceId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/devices/:id/tokens/rotate — Upstream device token rotate
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/devices/:id/tokens/rotate'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, deviceId: m.params.id };
-      const result = gatewayMethod('device.token.rotate', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.token.rotate', deviceId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/devices/:id/tokens/revoke — Upstream device token revoke
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/devices/:id/tokens/revoke'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, deviceId: m.params.id };
-      const result = gatewayMethod('device.token.revoke', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'device.token.revoke', deviceId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/wizard/start — Upstream wizard start
-  // =========================================================================
-  if (route(req, 'POST', '/api/wizard/start')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('wizard.start', body, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'wizard.start', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/wizard/next — Upstream wizard advance/answer
-  // =========================================================================
-  if (route(req, 'POST', '/api/wizard/next')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('wizard.next', body, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'wizard.next', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/wizard/cancel — Upstream wizard cancel
-  // =========================================================================
-  if (route(req, 'POST', '/api/wizard/cancel')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('wizard.cancel', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'wizard.cancel', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/wizard/status — Upstream wizard status lookup
-  // =========================================================================
-  if (route(req, 'POST', '/api/wizard/status')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('wizard.status', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'wizard.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/wizard/:sessionId — Upstream wizard status lookup
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/wizard/:sessionId'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const queryParams = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const params = { ...queryParams, sessionId: m.params.sessionId };
-      const result = gatewayMethod('wizard.status', params, { timeoutMs: Number(queryParams.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'wizard.status', sessionId: m.params.sessionId, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/exec-approvals — Upstream execution approvals file
-  // =========================================================================
-  if (route(req, 'GET', '/api/exec-approvals')) {
-    try {
-      const result = gatewayMethod('exec.approvals.get', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'exec.approvals.get', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/exec-approvals — Upstream execution approvals file update
-  // =========================================================================
-  if (route(req, 'PUT', '/api/exec-approvals')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('exec.approvals.set', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'exec.approvals.set', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/nodes/:id/exec-approvals — Upstream node execution approvals
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/nodes/:id/exec-approvals'))) {
-    try {
-      const result = gatewayMethod('exec.approvals.node.get', { nodeId: m.params.id }, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'exec.approvals.node.get', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/nodes/:id/exec-approvals — Upstream node execution approvals update
-  // =========================================================================
-  if ((m = route(req, 'PUT', '/api/nodes/:id/exec-approvals'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, nodeId: m.params.id };
-      const result = gatewayMethod('exec.approvals.node.set', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'exec.approvals.node.set', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/exec-approvals/requests — Upstream execution approval request
-  // =========================================================================
-  if (route(req, 'POST', '/api/exec-approvals/requests')) {
-    try {
-      const body = await parseBody(req);
-      const params = {
-        ...body,
-        twoPhase: body.twoPhase === undefined ? true : body.twoPhase
-      };
-      const result = gatewayMethod('exec.approval.request', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
-      return json(res, 200, { ok: true, method: 'exec.approval.request', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/exec-approvals/requests/:id — Upstream execution approval wait/poll
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/exec-approvals/requests/:id'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const queryParams = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const params = { ...queryParams, id: m.params.id };
-      const result = gatewayMethod('exec.approval.waitDecision', params, { timeoutMs: Number(queryParams.timeoutMs || 35000) || 35000 });
-      return json(res, 200, { ok: true, method: 'exec.approval.waitDecision', id: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/exec-approvals/requests/:id/decision — Upstream execution approval resolve
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/exec-approvals/requests/:id/decision'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, id: m.params.id };
-      const result = gatewayMethod('exec.approval.resolve', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'exec.approval.resolve', id: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/browser/request — Upstream browser request bridge
-  // =========================================================================
-  if (route(req, 'POST', '/api/browser/request')) {
-    try {
-      const body = await parseBody(req);
-      const method = typeof body.method === 'string' ? body.method.trim().toUpperCase() : '';
-      if (!method || !['GET', 'POST', 'DELETE'].includes(method)) {
-        return json(res, 400, { ok: false, error: 'method must be GET, POST, or DELETE' });
-      }
-      if (!body.path || typeof body.path !== 'string') {
-        return json(res, 400, { ok: false, error: 'path is required' });
-      }
-      const params = { ...body, method };
-      const result = gatewayMethod('browser.request', params, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'browser.request', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/chat/:sessionKey/history — Upstream chat history snapshot
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/chat/:sessionKey/history'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const queryParams = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const params = { ...queryParams, sessionKey: m.params.sessionKey };
-      const result = gatewayMethod('chat.history', params, { timeoutMs: Number(queryParams.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'chat.history', sessionKey: m.params.sessionKey, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/chat/send — Upstream chat send
-  // =========================================================================
-  if (route(req, 'POST', '/api/chat/send')) {
-    try {
-      const body = await parseBody(req);
-      const params = {
-        ...body,
-        idempotencyKey: body.idempotencyKey || crypto.randomUUID()
-      };
-      const result = gatewayMethod('chat.send', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
-      return json(res, 200, {
-        ok: true,
-        method: 'chat.send',
-        sessionKey: params.sessionKey,
-        idempotencyKey: params.idempotencyKey,
-        result
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/chat/:sessionKey/abort — Upstream chat abort
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/chat/:sessionKey/abort'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, sessionKey: m.params.sessionKey };
-      const result = gatewayMethod('chat.abort', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'chat.abort', sessionKey: m.params.sessionKey, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/secrets/reload — Upstream secrets reload
-  // =========================================================================
-  if (route(req, 'POST', '/api/secrets/reload')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('secrets.reload', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'secrets.reload', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/secrets/resolve — Upstream secret target resolution
-  // =========================================================================
-  if (route(req, 'POST', '/api/secrets/resolve')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('secrets.resolve', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'secrets.resolve', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/system/presence — Upstream system presence snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/system/presence')) {
-    try {
-      const result = gatewayMethod('system-presence', {}, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'system-presence', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/talk/config — Upstream talk configuration snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/talk/config')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('talk.config', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'talk.config', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/talk/speak — Upstream talk speech synthesis
-  // =========================================================================
-  if (route(req, 'POST', '/api/talk/speak')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('talk.speak', body, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
-      return json(res, 200, { ok: true, method: 'talk.speak', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/talk/mode — Upstream talk mode toggle
-  // =========================================================================
-  if (route(req, 'POST', '/api/talk/mode')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('talk.mode', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'talk.mode', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/update/run — Upstream update execution
-  // =========================================================================
-  if (route(req, 'POST', '/api/update/run')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('update.run', body, { timeoutMs: Number(body.timeoutMs || 180000) || 180000 });
-      return json(res, 200, { ok: true, method: 'update.run', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/send — Upstream outbound send
-  // =========================================================================
-  if (route(req, 'POST', '/api/send')) {
-    try {
-      const body = await parseBody(req);
-      const params = {
-        ...body,
-        idempotencyKey: body.idempotencyKey || crypto.randomUUID()
-      };
-      const result = gatewayMethod('send', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
-      return json(res, 200, {
-        ok: true,
-        method: 'send',
-        idempotencyKey: params.idempotencyKey,
-        result
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/agents/identity/resolve — Upstream agent identity resolve
-  // =========================================================================
-  if (route(req, 'POST', '/api/agents/identity/resolve')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('agent.identity.get', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'agent.identity.get', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/runtime/agent — Upstream agent run/invoke
-  // =========================================================================
-  if (route(req, 'POST', '/api/runtime/agent')) {
-    try {
-      const body = await parseBody(req);
-      const params = {
-        ...body,
-        idempotencyKey: body.idempotencyKey || crypto.randomUUID()
-      };
-      const result = gatewayMethod('agent', params, {
-        timeoutMs: Number(body.timeoutMs || 120000) || 120000,
-        expectFinal: body.expectFinal === true
-      });
-      return json(res, 200, {
-        ok: true,
-        method: 'agent',
-        idempotencyKey: params.idempotencyKey,
-        result
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/agent-runs/:runId/wait — Upstream agent run wait
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/agent-runs/:runId/wait'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, runId: m.params.runId };
-      const result = gatewayMethod('agent.wait', params, { timeoutMs: Number(body.timeoutMs || 35000) || 35000 });
-      return json(res, 200, { ok: true, method: 'agent.wait', runId: m.params.runId, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/system/events — Upstream system event ingest
-  // =========================================================================
-  if (route(req, 'POST', '/api/system/events')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('system-event', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'system-event', result });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
@@ -2981,157 +2085,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
-  // GET /api/config/schema — Flattened config schema/sample overview
-  // =========================================================================
-  if (route(req, 'GET', '/api/config/schema')) {
-    try {
-      const schemaSample = getConfigSchemaSample();
-      const flattened = flattenConfigSchema(schemaSample);
-      return json(res, 200, {
-        ok: true,
-        count: flattened.length,
-        schema: flattened,
-        roots: Object.keys(schemaSample || {})
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/config/schema/lookup?path=... — Lookup config value/schema path
-  // =========================================================================
-  if (route(req, 'GET', '/api/config/schema/lookup')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const path = (url.searchParams.get('path') || '').trim();
-      if (!path) {
-        return json(res, 400, { ok: false, error: 'Missing query parameter: path' });
-      }
-
-      const config = readConfig();
-      const live = getValueAtPath(config, path);
-      const schema = getValueAtPath(getConfigSchemaSample(), path);
-
-      return json(res, 200, {
-        ok: true,
-        path,
-        existsInConfig: live.exists,
-        existsInSchema: schema.exists,
-        value: live.exists ? redactSensitiveData(live.value, path.split('.').slice(-1)[0]) : null,
-        schemaValue: schema.exists ? redactSensitiveData(schema.value, path.split('.').slice(-1)[0]) : null,
-        type: live.exists ? (Array.isArray(live.value) ? 'array' : typeof live.value) : (schema.exists ? (Array.isArray(schema.value) ? 'array' : typeof schema.value) : null)
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PATCH /api/config — Deep-merge patch into openclaw.json
-  // =========================================================================
-  if (route(req, 'PATCH', '/api/config')) {
-    try {
-      const body = await parseBody(req);
-      const patch = body.patch && isPlainObject(body.patch) ? body.patch : body;
-      if (!isPlainObject(patch) || Object.keys(patch).length === 0) {
-        return json(res, 400, { ok: false, error: 'Missing patch object' });
-      }
-
-      const config = readConfig();
-      const merged = deepMerge(config, patch);
-
-      if (merged.gateway?.auth?.token === '***') {
-        merged.gateway.auth.token = getEnvValue('OPENCLAW_GATEWAY_TOKEN') || config.gateway?.auth?.token || '';
-      }
-
-      writeConfig(merged);
-      if (body.restart !== false) restartContainer('openclaw');
-
-      return json(res, 200, {
-        ok: true,
-        restarted: body.restart !== false,
-        updatedKeys: Object.keys(patch),
-        config: redactSensitiveData(merged)
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/config/raw — Set/delete a value by dot path
-  // =========================================================================
-  if (route(req, 'PUT', '/api/config/raw')) {
-    try {
-      const body = await parseBody(req);
-      const path = (body.path || '').trim();
-      if (!path) return json(res, 400, { ok: false, error: 'Missing path' });
-
-      const config = readConfig();
-      const before = getValueAtPath(config, path);
-      let changed = false;
-
-      if (body.remove === true) {
-        changed = deleteValueAtPath(config, path);
-        if (!changed) return json(res, 404, { ok: false, error: `Path not found: ${path}` });
-      } else if (body.value === undefined) {
-        return json(res, 400, { ok: false, error: 'Missing value or set remove=true' });
-      } else {
-        setValueAtPath(config, path, body.value);
-        changed = true;
-      }
-
-      writeConfig(config);
-      if (body.restart !== false) restartContainer('openclaw');
-
-      return json(res, 200, {
-        ok: true,
-        path,
-        restarted: body.restart !== false,
-        previousValue: before.exists ? redactSensitiveData(before.value, path.split('.').slice(-1)[0]) : null,
-        currentValue: body.remove === true ? null : redactSensitiveData(getValueAtPath(config, path).value, path.split('.').slice(-1)[0])
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/config/apply — Persist config and optionally restart services
-  // =========================================================================
-  if (route(req, 'POST', '/api/config/apply')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const restartTarget = body.restartTarget || 'openclaw';
-      const allowedTargets = ['openclaw', 'caddy', 'all', 'none'];
-      if (!allowedTargets.includes(restartTarget)) {
-        return json(res, 400, { ok: false, error: `Invalid restartTarget. Use: ${allowedTargets.join(', ')}` });
-      }
-
-      if (restartTarget === 'openclaw') restartContainer('openclaw');
-      if (restartTarget === 'caddy') dockerCompose('restart caddy', 30000);
-      if (restartTarget === 'all') dockerCompose('up -d --remove-orphans', 120000);
-
-      return json(res, 200, {
-        ok: true,
-        applied: true,
-        restartTarget,
-        message: restartTarget === 'none' ? 'Configuration persisted without restart.' : `Configuration applied and ${restartTarget} restart triggered.`
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/config/file — Raw config file with basic metadata
-  // =========================================================================
-  if (route(req, 'GET', '/api/config/file')) {
-    try {
-      const content = readEnvFile ? fs.readFileSync(`${CONFIG_DIR}/openclaw.json`, 'utf8') : fs.readFileSync(`${CONFIG_DIR}/openclaw.json`, 'utf8');
-      const stats = fs.statSync(`${CONFIG_DIR}/openclaw.json`);
-      return json(res, 200, {
-        ok: true,
-        path: `${CONFIG_DIR}/openclaw.json`,
-        size: stats.size,
-        updatedAt: stats.mtime.toISOString(),
-        content
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
   // PUT /api/config/provider — Doi provider + model
   // =========================================================================
   if (route(req, 'PUT', '/api/config/provider')) {
@@ -3181,7 +2134,7 @@ const server = http.createServer(async (req, res) => {
         if (!config.browser) config.browser = customTpl.browser;
 
         writeConfig(config);
-        restartContainer('openclaw');
+        restartService(OPENCLAW_SERVICE);
         return json(res, 200, { ok: true, provider, model: config.agents.defaults.model.primary });
       }
 
@@ -3232,7 +2185,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       writeConfig(config);
-      restartContainer('openclaw');
+      finalizeAuth();
 
       return json(res, 200, { ok: true, provider, model: config.agents.defaults.model.primary });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3259,10 +2212,10 @@ const server = http.createServer(async (req, res) => {
         setEnvValue(providerConfig.envKey, apiKey);
       }
 
-      // 2. Write auth-profiles.json for the target agent
+      // 2. Write auth-profiles.json for the target agent, import into SQLite, restart
       setAuthProfileApiKey(providerConfig.authProfileProvider, apiKey, targetAgent);
 
-      restartContainer('openclaw');
+      finalizeAuth();
 
       return json(res, 200, { ok: true, provider, agentId: targetAgent, apiKey: sanitizeKey(apiKey) });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3273,8 +2226,11 @@ const server = http.createServer(async (req, res) => {
   // =========================================================================
   if (route(req, 'DELETE', '/api/config/api-key')) {
     try {
-      const body = await parseBody(req);
-      const { provider: rawProvider, agentId } = body;
+      // Accept provider/agentId from query string OR body (DELETE often has no body).
+      const { query } = route(req, 'DELETE', '/api/config/api-key');
+      const body = await parseBody(req).catch(() => ({}));
+      const rawProvider = body.provider || query.provider;
+      const agentId = body.agentId || query.agentId;
       const provider = resolveProvider(rawProvider);
 
       const providerConfig = PROVIDERS[provider];
@@ -3291,7 +2247,7 @@ const server = http.createServer(async (req, res) => {
         removeEnvValue(providerConfig.envKey);
       }
 
-      restartContainer('openclaw');
+      finalizeAuth();
 
       return json(res, 200, { ok: true, provider, agentId: targetAgent, removed: true });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3368,7 +2324,7 @@ const server = http.createServer(async (req, res) => {
           p.models.push({ id: modelId, name: modelName || modelId });
         }
       }
-      tpl.gateway = { mode: 'local', bind: 'lan', auth: { token: '${OPENCLAW_GATEWAY_TOKEN}' }, trustedProxies: ['127.0.0.1', '::1', '172.16.0.0/12', '10.0.0.0/8', '192.168.0.0/16'], controlUi: { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: false } };
+      tpl.gateway = { mode: 'local', bind: 'lan', auth: { token: '${OPENCLAW_GATEWAY_TOKEN}' }, trustedProxies: ['127.0.0.1', '::1', '172.16.0.0/12', '10.0.0.0/8', '192.168.0.0/16'], controlUi: { enabled: true, dangerouslyAllowHostHeaderOriginFallback: true } };
       tpl.browser = { headless: true, defaultProfile: 'openclaw', noSandbox: true };
 
       fs.writeFileSync(tplPath, JSON.stringify(tpl, null, 2), 'utf8');
@@ -3388,7 +2344,7 @@ const server = http.createServer(async (req, res) => {
       if (!config.browser) config.browser = tpl.browser;
       writeConfig(config);
 
-      restartContainer('openclaw');
+      finalizeAuth();
 
       return json(res, 200, { ok: true, provider: providerName, model, baseUrl, apiKey: sanitizeKey(apiKey) });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3475,14 +2431,19 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(tplPath, JSON.stringify(tpl, null, 2), 'utf8');
 
       // Also update active config if this provider is currently in use
+      let activeRestarted = false;
       try {
         const config = readConfig();
         if (config.models?.providers?.[providerName]) {
           config.models.providers[providerName] = { ...p };
           writeConfig(config);
-          restartContainer('openclaw');
+          finalizeAuth(); // import any updated key into SQLite + restart
+          activeRestarted = true;
         }
       } catch {}
+
+      // If a new key was written but the provider isn't active, still import it.
+      if (body.apiKey && !activeRestarted) migrateAuthToSqlite();
 
       return json(res, 200, { ok: true, provider: providerName, config: { baseUrl: p.baseUrl, api: p.api, models: p.models } });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3532,7 +2493,7 @@ const server = http.createServer(async (req, res) => {
       try { removeEnvValue(envKey); } catch {}
       try { removeAgentApiKey('main', providerName); } catch {}
 
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, provider: providerName, removed: true });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -3681,41 +2642,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
-  // GET /api/channels/status — Upstream gateway channel status snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('channels.status', params, { timeoutMs: Number(params.timeout || 20000) || 20000 });
-      return json(res, 200, { ok: true, method: 'channels.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/channels/logout — Upstream gateway logout for channel/account
-  // =========================================================================
-  if (route(req, 'POST', '/api/channels/logout')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('channels.logout', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'channels.logout', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/channels/:channel/logout — Convenience wrapper with channel path
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/channels/:channel/logout'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, channel: m.params.channel };
-      const result = gatewayMethod('channels.logout', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'channels.logout', channel: m.params.channel, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
   // PUT /api/channels/:channel — Them/sua token kenh
   // =========================================================================
   if ((m = route(req, 'PUT', '/api/channels/:channel'))) {
@@ -3753,7 +2679,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
       return json(res, 200, { ok: true, channel, token: sanitizeKey(body.token) });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -3783,990 +2709,8 @@ const server = http.createServer(async (req, res) => {
         writeConfig(config);
       } catch {}
 
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
       return json(res, 200, { ok: true, channel, removed: true });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/channels/zalo/plugin/install — Install Zalo plugin inside OpenClaw
-  // =========================================================================
-  if (route(req, 'POST', '/api/channels/zalo/plugin/install')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const spec = String(body.spec || '@openclaw/zalo').trim();
-      const allowedSpecs = ['@openclaw/zalo', './extensions/zalo'];
-      if (!allowedSpecs.includes(spec)) {
-        return json(res, 400, { ok: false, error: `Unsupported Zalo plugin spec. Use one of: ${allowedSpecs.join(', ')}` });
-      }
-
-      const output = openclawCli(['plugins', 'install', spec], { timeoutMs: Number(body.timeoutMs || 180000) || 180000 });
-
-      const config = readConfig();
-      if (!config.plugins) config.plugins = { entries: {} };
-      if (!config.plugins.entries) config.plugins.entries = {};
-      config.plugins.entries.zalo = { ...(config.plugins.entries.zalo || {}), enabled: true };
-      writeConfig(config);
-
-      const restarted = body.restart !== false;
-      if (restarted) restartContainer('openclaw');
-
-      return json(res, 200, {
-        ok: true,
-        channel: 'zalo',
-        plugin: spec,
-        restarted,
-        output,
-        state: buildZaloChannelState()
-      });
-    } catch (e) {
-      const stderr = e.stderr ? e.stderr.toString() : '';
-      const stdout = e.stdout ? e.stdout.toString() : '';
-      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
-    }
-  }
-
-  // =========================================================================
-  // GET /api/channels/zalo/config — Return local Zalo config snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/zalo/config')) {
-    try {
-      return json(res, 200, { ok: true, channel: 'zalo', state: buildZaloChannelState() });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PATCH /api/channels/zalo/config — Merge local Zalo config and enable plugin
-  // =========================================================================
-  if (route(req, 'PATCH', '/api/channels/zalo/config')) {
-    try {
-      const body = await parseBody(req);
-      const patch = isPlainObject(body.patch) ? deepClone(body.patch) : deepClone(body);
-      delete patch.patch;
-      delete patch.restart;
-      delete patch.removeEnvToken;
-      delete patch.syncEnvDefaultToken;
-      delete patch.timeoutMs;
-
-      const validationErrors = validateZaloConfigInput(patch);
-      if (validationErrors.length > 0) {
-        return json(res, 400, { ok: false, error: validationErrors[0], errors: validationErrors });
-      }
-
-      const config = readConfig();
-      if (!config.channels) config.channels = {};
-      const current = isPlainObject(config.channels.zalo) ? config.channels.zalo : {};
-      const merged = deepMerge(current, patch);
-
-      if (merged.enabled === undefined) merged.enabled = true;
-      const defaultDmPolicy = getValueAtPath(merged, 'accounts.default.dmPolicy');
-      if (!defaultDmPolicy.exists && !merged.dmPolicy) {
-        if (isPlainObject(merged.accounts?.default)) {
-          merged.accounts.default.dmPolicy = 'pairing';
-        } else {
-          merged.dmPolicy = 'pairing';
-        }
-      }
-
-      const rootTokenPatch = getValueAtPath(patch, 'botToken');
-      const defaultTokenPatch = getValueAtPath(patch, 'accounts.default.botToken');
-      if (body.removeEnvToken === true) {
-        removeEnvValue('ZALO_BOT_TOKEN');
-      } else if (rootTokenPatch.exists && typeof rootTokenPatch.value === 'string' && rootTokenPatch.value.trim()) {
-        setEnvValue('ZALO_BOT_TOKEN', rootTokenPatch.value.trim());
-      } else if (defaultTokenPatch.exists && typeof defaultTokenPatch.value === 'string' && defaultTokenPatch.value.trim() && body.syncEnvDefaultToken !== false) {
-        setEnvValue('ZALO_BOT_TOKEN', defaultTokenPatch.value.trim());
-      }
-
-      config.channels.zalo = merged;
-      if (!config.plugins) config.plugins = { entries: {} };
-      if (!config.plugins.entries) config.plugins.entries = {};
-      config.plugins.entries.zalo = { ...(config.plugins.entries.zalo || {}), enabled: true };
-      writeConfig(config);
-
-      const restarted = body.restart !== false;
-      if (restarted) restartContainer('openclaw');
-
-      return json(res, 200, { ok: true, channel: 'zalo', restarted, state: buildZaloChannelState() });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/channels/zalo/status — Filtered gateway channel status for Zalo
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/zalo/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const query = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('channels.status', { ...query, probe: query.probe === undefined ? true : query.probe }, { timeoutMs: Number(query.timeout || query.timeoutMs || 20000) || 20000 });
-      const filtered = isPlainObject(result) && Array.isArray(result.channels)
-        ? { ...result, channels: result.channels.filter(item => item && item.channel === 'zalo') }
-        : result;
-      return json(res, 200, { ok: true, channel: 'zalo', method: 'channels.status', result: filtered });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/channels/zalo/webhook/config — Local webhook visibility for Zalo
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/zalo/webhook/config')) {
-    try {
-      const state = buildZaloChannelState();
-      const config = state.config || {};
-      const rootWebhookUrl = getValueAtPath(config, 'webhookUrl');
-      const rootWebhookPath = getValueAtPath(config, 'webhookPath');
-      const rootWebhookSecret = getValueAtPath(config, 'webhookSecret');
-      const defaultWebhookUrl = getValueAtPath(config, 'accounts.default.webhookUrl');
-      const defaultWebhookPath = getValueAtPath(config, 'accounts.default.webhookPath');
-      const defaultWebhookSecret = getValueAtPath(config, 'accounts.default.webhookSecret');
-
-      return json(res, 200, {
-        ok: true,
-        channel: 'zalo',
-        webhook: {
-          mode: state.summary.transportMode,
-          configured: state.summary.webhookConfigured,
-          root: {
-            webhookUrl: rootWebhookUrl.exists ? rootWebhookUrl.value : null,
-            webhookPath: rootWebhookPath.exists ? rootWebhookPath.value : null,
-            secretConfigured: !!(rootWebhookSecret.exists && rootWebhookSecret.value)
-          },
-          defaultAccount: {
-            webhookUrl: defaultWebhookUrl.exists ? defaultWebhookUrl.value : null,
-            webhookPath: defaultWebhookPath.exists ? defaultWebhookPath.value : null,
-            secretConfigured: !!(defaultWebhookSecret.exists && defaultWebhookSecret.value)
-          },
-          constraints: {
-            httpsRequired: true,
-            secretLength: '8-256 chars',
-            pollingAndWebhookMutuallyExclusive: true
-          }
-        }
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/channels/zalo/pairings — List pending/approved Zalo pairings
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/zalo/pairings')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const account = url.searchParams.get('account');
-      const args = ['pairing', 'list', 'zalo'];
-      if (account) args.push('--account', account);
-      args.push('--json');
-      const result = openclawCli(args, { timeoutMs: Number(url.searchParams.get('timeoutMs') || 20000) || 20000, json: true });
-      return json(res, 200, { ok: true, channel: 'zalo', method: 'pairing.list', result });
-    } catch (e) {
-      const stderr = e.stderr ? e.stderr.toString() : '';
-      const stdout = e.stdout ? e.stdout.toString() : '';
-      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
-    }
-  }
-
-  // =========================================================================
-  // POST /api/channels/zalo/pairings/approve — Approve a Zalo pairing code
-  // =========================================================================
-  if (route(req, 'POST', '/api/channels/zalo/pairings/approve')) {
-    try {
-      const body = await parseBody(req);
-      const code = String(body.code || '').trim();
-      if (!code) return json(res, 400, { ok: false, error: 'Missing code' });
-
-      const args = ['pairing', 'approve', 'zalo', code];
-      if (body.account) args.push('--account', String(body.account));
-      if (body.notify === true) args.push('--notify');
-
-      const output = openclawCli(args, { timeoutMs: Number(body.timeoutMs || 20000) || 20000 });
-      return json(res, 200, {
-        ok: true,
-        channel: 'zalo',
-        method: 'pairing.approve',
-        code,
-        result: parseCliJsonOutput(output)
-      });
-    } catch (e) {
-      const stderr = e.stderr ? e.stderr.toString() : '';
-      const stdout = e.stdout ? e.stdout.toString() : '';
-      return json(res, 500, { ok: false, error: stdout || stderr || e.message });
-    }
-  }
-
-  // =========================================================================
-  // GET /api/channels/zalo/diagnostics — Consolidated Zalo snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/channels/zalo/diagnostics')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const timeoutMs = Number(url.searchParams.get('timeoutMs') || 20000) || 20000;
-      const diagnostics = {
-        state: buildZaloChannelState(),
-        status: null,
-        pairings: null,
-        errors: {}
-      };
-
-      try {
-        const status = gatewayMethod('channels.status', { probe: true }, { timeoutMs });
-        diagnostics.status = isPlainObject(status) && Array.isArray(status.channels)
-          ? { ...status, channels: status.channels.filter(item => item && item.channel === 'zalo') }
-          : status;
-      } catch (e) {
-        diagnostics.errors.status = e.message;
-      }
-
-      try {
-        diagnostics.pairings = openclawCli(['pairing', 'list', 'zalo', '--json'], { timeoutMs, json: true });
-      } catch (e) {
-        diagnostics.errors.pairings = e.stderr ? e.stderr.toString() : e.message;
-      }
-
-      return json(res, 200, {
-        ok: true,
-        channel: 'zalo',
-        diagnostics,
-        guidance: {
-          pluginRequired: true,
-          installCommand: 'openclaw plugins install @openclaw/zalo',
-          dmPolicyDefault: 'pairing',
-          groupsAvailableForMarketplaceBots: false,
-          webhookRequiresHttps: true
-        }
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/models — Upstream model catalog
-  // =========================================================================
-  if (route(req, 'GET', '/api/models')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('models.list', params, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'models.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/tools/catalog — Upstream tool catalog
-  // =========================================================================
-  if (route(req, 'GET', '/api/tools/catalog')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('tools.catalog', params, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'tools.catalog', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/usage/status — Upstream usage/provider status
-  // =========================================================================
-  if (route(req, 'GET', '/api/usage/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('usage.status', params, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'usage.status', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/usage/cost — Upstream usage cost summary
-  // =========================================================================
-  if (route(req, 'GET', '/api/usage/cost')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('usage.cost', params, { timeoutMs: 30000 });
-      return json(res, 200, { ok: true, method: 'usage.cost', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/skills/install — Upstream skill install wrapper
-  // =========================================================================
-  if (route(req, 'POST', '/api/skills/install')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('skills.install', body, { timeoutMs: Number(body.timeoutMs || 120000) || 120000, expectFinal: body.expectFinal === true });
-      return json(res, 200, { ok: true, method: 'skills.install', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/sessions — Upstream session listing
-  // =========================================================================
-  if (route(req, 'GET', '/api/sessions')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('sessions.list', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'sessions.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/sessions/:key/preview — Upstream session preview
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/sessions/:key/preview'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams({ ...Object.fromEntries(url.searchParams), key: m.params.key });
-      const result = gatewayMethod('sessions.preview', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'sessions.preview', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/sessions — Upstream session creation
-  // =========================================================================
-  if (route(req, 'POST', '/api/sessions')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('sessions.create', body, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'sessions.create', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/sessions/:key/send — Upstream session send
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/sessions/:key/send'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.send', params, {
-        timeoutMs: Number(body.timeoutMs || 120000) || 120000,
-        expectFinal: body.expectFinal === true
-      });
-      return json(res, 200, { ok: true, method: 'sessions.send', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/sessions/:key/abort — Upstream session abort
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/sessions/:key/abort'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.abort', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'sessions.abort', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PATCH /api/sessions/:key — Upstream session patch
-  // =========================================================================
-  if ((m = route(req, 'PATCH', '/api/sessions/:key'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.patch', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'sessions.patch', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/sessions/:key/reset — Upstream session reset
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/sessions/:key/reset'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.reset', params, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'sessions.reset', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // DELETE /api/sessions/:key — Upstream session delete
-  // =========================================================================
-  if ((m = route(req, 'DELETE', '/api/sessions/:key'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.delete', params, { timeoutMs: Number(body.timeoutMs || 60000) || 60000 });
-      return json(res, 200, { ok: true, method: 'sessions.delete', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/sessions/:key/compact — Upstream session compaction
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/sessions/:key/compact'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { ...body, key: m.params.key };
-      const result = gatewayMethod('sessions.compact', params, { timeoutMs: Number(body.timeoutMs || 120000) || 120000 });
-      return json(res, 200, { ok: true, method: 'sessions.compact', key: m.params.key, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/nodes/pairing — Upstream node pairing snapshot
-  // =========================================================================
-  if (route(req, 'GET', '/api/nodes/pairing')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('node.pair.list', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pair.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pairing/request — Upstream node pairing request
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pairing/request')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('node.pair.request', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pair.request', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pairing/approve — Upstream node pairing approve
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pairing/approve')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pair.approve', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pair.approve', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pairing/reject — Upstream node pairing reject
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pairing/reject')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pair.reject', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pair.reject', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pairing/verify — Upstream node pairing verify
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pairing/verify')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pair.verify', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pair.verify', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pending/drain — Upstream pending node queue drain
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pending/drain')) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const result = gatewayMethod('node.pending.drain', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pending.drain', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pending/enqueue — Upstream pending node queue enqueue
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pending/enqueue')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pending.enqueue', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pending.enqueue', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pending/pull — Upstream pending node queue pull
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pending/pull')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pending.pull', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pending.pull', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/pending/ack — Upstream pending node queue ack
-  // =========================================================================
-  if (route(req, 'POST', '/api/nodes/pending/ack')) {
-    try {
-      const body = await parseBody(req);
-      const result = gatewayMethod('node.pending.ack', body, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.pending.ack', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/nodes — Upstream node list
-  // =========================================================================
-  if (route(req, 'GET', '/api/nodes')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams(Object.fromEntries(url.searchParams));
-      const result = gatewayMethod('node.list', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.list', result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/nodes/:id — Upstream node describe
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/nodes/:id'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const params = normalizeGatewayParams({ ...Object.fromEntries(url.searchParams), nodeId: m.params.id });
-      const result = gatewayMethod('node.describe', params, { timeoutMs: Number(params.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.describe', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/nodes/:id/rename — Upstream node rename
-  // =========================================================================
-  if ((m = route(req, 'PUT', '/api/nodes/:id/rename'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { nodeId: m.params.id, ...body };
-      if (!params.displayName && params.name) params.displayName = params.name;
-      const result = gatewayMethod('node.rename', params, { timeoutMs: Number(body.timeoutMs || 30000) || 30000 });
-      return json(res, 200, { ok: true, method: 'node.rename', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/:id/invoke — Upstream node invoke
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/nodes/:id/invoke'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { nodeId: m.params.id, ...body };
-      const result = gatewayMethod('node.invoke', params, {
-        timeoutMs: Number(body.timeoutMs || body.invokeTimeout || 60000) || 60000,
-        expectFinal: body.expectFinal === true
-      });
-      return json(res, 200, { ok: true, method: 'node.invoke', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/:id/invoke-result — Upstream node invoke result callback
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/nodes/:id/invoke-result'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { nodeId: m.params.id, ...body };
-      const result = gatewayMethod('node.invoke.result', params, {
-        timeoutMs: Number(body.timeoutMs || 30000) || 30000
-      });
-      return json(res, 200, { ok: true, method: 'node.invoke.result', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/:id/events — Upstream node event ingest
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/nodes/:id/events'))) {
-    try {
-      const body = await parseBody(req);
-      const params = { nodeId: m.params.id, ...body };
-      const result = gatewayMethod('node.event', params, {
-        timeoutMs: Number(body.timeoutMs || 30000) || 30000
-      });
-      return json(res, 200, { ok: true, method: 'node.event', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/nodes/:id/canvas/capability/refresh — Upstream canvas capability refresh
-  // =========================================================================
-  if ((m = route(req, 'POST', '/api/nodes/:id/canvas/capability/refresh'))) {
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const params = { nodeId: m.params.id, ...body };
-      const result = gatewayMethod('node.canvas.capability.refresh', params, {
-        timeoutMs: Number(body.timeoutMs || 30000) || 30000
-      });
-      return json(res, 200, { ok: true, method: 'node.canvas.capability.refresh', nodeId: m.params.id, result });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills — List available skills across workspace/managed roots
-  // =========================================================================
-  if (route(req, 'GET', '/api/skills')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      if (agentId !== 'main' && !isValidAgentId(agentId)) {
-        return json(res, 400, { ok: false, error: 'Invalid agentId' });
-      }
-
-      const config = readConfig();
-      const result = listAvailableSkills(config, agentId);
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        roots: result.roots,
-        count: result.skills.length,
-        skills: result.skills.map(skill => ({
-          skillKey: skill.skillKey,
-          title: skill.title,
-          description: skill.description,
-          source: skill.source,
-          path: skill.path,
-          directory: skill.directoryName,
-          requiredBins: skill.requiredBins,
-          enabled: skill.configEntry?.enabled !== false,
-          configEntry: redactSensitiveData(skill.configEntry),
-          metadata: skill.metadata
-        }))
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills/status — Skill status summary for an agent
-  // =========================================================================
-  if (route(req, 'GET', '/api/skills/status')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const config = readConfig();
-      const result = listAvailableSkills(config, agentId);
-      const skillsConfig = config.skills || {};
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        workspaceSkillsDir: getWorkspaceSkillsDir(config, agentId),
-        managedSkillsDir: getManagedSkillsDir(),
-        extraDirs: getExtraSkillDirs(config),
-        allowBundled: skillsConfig.allowBundled || null,
-        watch: skillsConfig.load?.watch !== false,
-        watchDebounceMs: skillsConfig.load?.watchDebounceMs || 250,
-        install: skillsConfig.install || { preferBrew: true, nodeManager: 'npm' },
-        totalSkills: result.skills.length,
-        enabledSkills: result.skills.filter(skill => skill.configEntry?.enabled !== false).length,
-        disabledSkills: result.skills.filter(skill => skill.configEntry?.enabled === false).map(skill => skill.skillKey)
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills/bins — Aggregate required binaries from discovered skills
-  // =========================================================================
-  if (route(req, 'GET', '/api/skills/bins')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const config = readConfig();
-      const result = listAvailableSkills(config, agentId);
-      const bins = [...new Set(result.skills.flatMap(skill => skill.requiredBins))].sort();
-      return json(res, 200, { ok: true, agentId, bins, count: bins.length });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills/:skillKey — Detailed skill document and metadata
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/skills/:skillKey'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const skillKey = m.params.skillKey;
-      const config = readConfig();
-      const result = listAvailableSkills(config, agentId);
-      const skill = result.skills.find(item => item.skillKey === skillKey || item.directoryName === skillKey);
-      if (!skill) return json(res, 404, { ok: false, error: `Skill '${skillKey}' not found` });
-
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        skill: {
-          skillKey: skill.skillKey,
-          title: skill.title,
-          description: skill.description,
-          source: skill.source,
-          path: skill.path,
-          directory: skill.directoryName,
-          metadata: skill.metadata,
-          frontmatter: skill.frontmatter,
-          requiredBins: skill.requiredBins,
-          configEntry: redactSensitiveData(skill.configEntry),
-          content: skill.content
-        }
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/skills/update — Update skills config entry in openclaw.json
-  // =========================================================================
-  if (route(req, 'POST', '/api/skills/update')) {
-    try {
-      const body = await parseBody(req);
-      const skillKey = (body.skillKey || '').trim();
-      if (!isValidSkillKey(skillKey)) {
-        return json(res, 400, { ok: false, error: 'Invalid skillKey' });
-      }
-
-      const config = readConfig();
-      if (!config.skills) config.skills = {};
-      if (!config.skills.entries) config.skills.entries = {};
-
-      const current = isPlainObject(config.skills.entries[skillKey]) ? deepClone(config.skills.entries[skillKey]) : {};
-      if (typeof body.enabled === 'boolean') current.enabled = body.enabled;
-      if (body.apiKey !== undefined) {
-        if (body.apiKey) current.apiKey = body.apiKey;
-        else delete current.apiKey;
-      }
-      if (isPlainObject(body.env)) {
-        const nextEnv = isPlainObject(current.env) ? current.env : {};
-        for (const [key, value] of Object.entries(body.env)) {
-          if (!value) delete nextEnv[key];
-          else nextEnv[key] = String(value);
-        }
-        current.env = nextEnv;
-      }
-      if (isPlainObject(body.config)) {
-        current.config = deepMerge(current.config || {}, body.config);
-      }
-
-      config.skills.entries[skillKey] = current;
-      writeConfig(config);
-      if (body.restart !== false) restartContainer('openclaw');
-
-      return json(res, 200, {
-        ok: true,
-        skillKey,
-        restarted: body.restart !== false,
-        config: redactSensitiveData(current)
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/skills/custom — Create a detailed custom workspace skill
-  // =========================================================================
-  if (route(req, 'POST', '/api/skills/custom')) {
-    try {
-      const body = await parseBody(req);
-      const agentId = (body.agentId || 'main').trim();
-      const skillKey = (body.skillKey || body.name || '').trim();
-      if (!isValidSkillKey(skillKey)) {
-        return json(res, 400, { ok: false, error: 'Invalid skillKey. Use lowercase letters, numbers, hyphens, or underscores.' });
-      }
-
-      const config = readConfig();
-      const skillsDir = ensureDirectory(getWorkspaceSkillsDir(config, agentId));
-      const skillDir = `${skillsDir}/${skillKey}`;
-      const skillFile = `${skillDir}/SKILL.md`;
-      if (fs.existsSync(skillFile)) {
-        return json(res, 409, { ok: false, error: `Skill '${skillKey}' already exists` });
-      }
-
-      ensureDirectory(skillDir);
-      const content = buildCustomSkillMarkdown({ ...body, skillKey });
-      fs.writeFileSync(skillFile, content, 'utf8');
-
-      return json(res, 201, {
-        ok: true,
-        agentId,
-        skillKey,
-        path: skillFile,
-        created: true,
-        message: 'Custom skill created successfully.',
-        content
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/skills/custom/:skillKey — Update an existing workspace skill
-  // =========================================================================
-  if ((m = route(req, 'PUT', '/api/skills/custom/:skillKey'))) {
-    try {
-      const body = await parseBody(req);
-      const agentId = (body.agentId || 'main').trim();
-      const skillKey = m.params.skillKey;
-      const config = readConfig();
-      const existing = findWorkspaceSkill(config, agentId, skillKey);
-      if (!existing) {
-        return json(res, 404, { ok: false, error: `Workspace skill '${skillKey}' not found` });
-      }
-
-      const parsed = parseSkillDocument(existing.content);
-      const nextContent = buildCustomSkillMarkdown({
-        skillKey: parsed.frontmatter.name || existing.skillKey,
-        title: body.title || existing.title,
-        description: body.description || parsed.frontmatter.description || existing.description,
-        summary: body.summary,
-        metadata: isPlainObject(body.metadata) ? body.metadata : existing.metadata,
-        activation: body.activation,
-        inputs: body.inputs,
-        workflow: body.workflow,
-        outputs: body.outputs,
-        commandExamples: body.commandExamples,
-        configNotes: body.configNotes,
-        safetyNotes: body.safetyNotes,
-        troubleshooting: body.troubleshooting
-      });
-
-      fs.writeFileSync(existing.path, nextContent, 'utf8');
-      return json(res, 200, { ok: true, agentId, skillKey, updated: true, path: existing.path, content: nextContent });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills/custom — List custom workspace skills with rich parsed detail
-  // =========================================================================
-  if (route(req, 'GET', '/api/skills/custom')) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const includeContent = (url.searchParams.get('includeContent') || '').trim().toLowerCase() === 'true';
-      const config = readConfig();
-      const skills = listSkillsInDirectory(getWorkspaceSkillsDir(config, agentId), 'workspace', config, agentId);
-      const customSkills = skills.map(skill => buildCustomSkillResponse(skill, { includeContent }));
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        count: customSkills.length,
-        skills: customSkills,
-        skillKeys: customSkills.map(skill => skill.skillKey)
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/skills/custom/:skillKey — Rich custom skill detail
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/skills/custom/:skillKey'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const includeContent = (url.searchParams.get('includeContent') || 'true').trim().toLowerCase() !== 'false';
-      const config = readConfig();
-      const existing = findWorkspaceSkill(config, agentId, m.params.skillKey);
-      if (!existing) {
-        return json(res, 404, { ok: false, error: `Workspace skill '${m.params.skillKey}' not found` });
-      }
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        skill: buildCustomSkillResponse(existing, { includeContent })
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/skills/custom/validate — Validate arbitrary custom skill markdown
-  // =========================================================================
-  if (route(req, 'POST', '/api/skills/custom/validate')) {
-    try {
-      const body = await parseBody(req);
-      const content = typeof body.content === 'string' ? body.content : '';
-      if (!content.trim()) {
-        return json(res, 400, { ok: false, error: 'content is required' });
-      }
-      const expectedSkillKey = (body.skillKey || '').trim();
-      const validation = validateCustomSkillContent(content, expectedSkillKey);
-      return json(res, validation.ok ? 200 : 422, {
-        ok: validation.ok,
-        skillKey: validation.skillKey,
-        issues: validation.issues,
-        missingSections: validation.missingSections,
-        parsed: {
-          title: validation.parsed.title,
-          description: validation.parsed.description,
-          summary: validation.parsed.summary,
-          metadata: validation.parsed.metadata,
-          sections: validation.parsed.sections
-        }
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // POST /api/skills/custom/render — Render detailed custom skill markdown from JSON
-  // =========================================================================
-  if (route(req, 'POST', '/api/skills/custom/render')) {
-    try {
-      const body = await parseBody(req);
-      const skillKey = toSkillKey(body.skillKey || body.name || body.title || '');
-      if (!isValidSkillKey(skillKey)) {
-        return json(res, 400, { ok: false, error: 'Invalid skillKey. Provide skillKey, name, or title.' });
-      }
-      const content = buildCustomSkillMarkdown({ ...body, skillKey });
-      const validation = validateCustomSkillContent(content, skillKey);
-      return json(res, 200, {
-        ok: true,
-        skillKey,
-        content,
-        validation
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // DELETE /api/skills/custom/:skillKey — Remove a custom workspace skill
-  // =========================================================================
-  if ((m = route(req, 'DELETE', '/api/skills/custom/:skillKey'))) {
-    try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const agentId = (url.searchParams.get('agentId') || 'main').trim();
-      const config = readConfig();
-      const existing = findWorkspaceSkill(config, agentId, m.params.skillKey);
-      if (!existing) {
-        return json(res, 404, { ok: false, error: `Workspace skill '${m.params.skillKey}' not found` });
-      }
-
-      fs.rmSync(existing.skillDir, { recursive: true, force: true });
-
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        skillKey: existing.skillKey,
-        deleted: true,
-        path: existing.skillDir
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/doctor/memory-status — Basic embedding readiness summary
-  // =========================================================================
-  if (route(req, 'GET', '/api/doctor/memory-status')) {
-    try {
-      const config = readConfig();
-      const defaultAgentId = getDefaultAgentId(config);
-      const model = config.agents?.defaults?.model?.primary || null;
-      const provider = model ? model.split('/')[0] : null;
-      let hasApiKey = false;
-      if (provider && PROVIDERS[provider]) {
-        const p = PROVIDERS[provider];
-        hasApiKey = !!(getEnvValue(p.envKey) || getAuthProfileApiKey(p.authProfileProvider, defaultAgentId));
-      }
-
-      return json(res, 200, {
-        ok: true,
-        agentId: defaultAgentId,
-        provider,
-        embedding: {
-          ok: hasApiKey,
-          error: hasApiKey ? null : 'No provider API key detected for the default agent.'
-        },
-        note: 'This endpoint provides a management-layer readiness check based on current config and credentials.'
-      });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
@@ -4822,10 +2766,10 @@ const server = http.createServer(async (req, res) => {
           config.gateway.auth.token = body.value;
           writeConfig(config);
         } catch {}
-        dockerCompose('up -d --force-recreate caddy', 60000);
+        restartService(CADDY_SERVICE);
       }
 
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
       return json(res, 200, { ok: true, key, applied: true });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -4841,7 +2785,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 403, { ok: false, error: 'Cannot remove protected environment variable' });
       }
       removeEnvValue(key);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
       return json(res, 200, { ok: true, key, removed: true });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -4878,7 +2822,7 @@ const server = http.createServer(async (req, res) => {
           usagePercent: disk[3] || 'unknown'
         },
         nodeVersion: process.version,
-        dockerVersion: (() => { try { return shell('docker --version'); } catch { return 'unknown'; } })()
+        openclawVersion: (() => { try { return shell(`${OPENCLAW_BIN} --version 2>/dev/null`).trim(); } catch { return 'unknown'; } })()
       });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
@@ -4897,7 +2841,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { ok: false, error: 'Command contains disallowed characters' });
       }
 
-      const output = dockerExec(`node dist/index.js ${command}`, 60000);
+      const output = openclawExec(command, 60000);
       return json(res, 200, { ok: true, output });
     } catch (e) {
       const stderr = e.stderr ? e.stderr.toString() : '';
@@ -4907,21 +2851,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
-  // GET /api/devices — List tat ca devices cho agent
+  // GET /api/devices — List tat ca devices (file I/O, khong spawn CLI)
   // =========================================================================
   if (route(req, 'GET', '/api/devices')) {
     try {
-      const output = dockerExec('node dist/index.js devices list', 15000);
-      return json(res, 200, { ok: true, output });
+      let pending = {};
+      let paired = {};
+      try { pending = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')); } catch {}
+      try { paired = JSON.parse(fs.readFileSync(PAIRED_FILE, 'utf8')); } catch {}
+      return json(res, 200, { ok: true, pending, paired });
     } catch (e) {
-      const stderr = e.stderr ? e.stderr.toString() : '';
-      const stdout = e.stdout ? e.stdout.toString() : '';
-      return json(res, 200, { ok: false, output: stdout || stderr || e.message });
+      return json(res, 500, { ok: false, error: e.message });
     }
   }
 
   // =========================================================================
-  // POST /api/devices/approve/:deviceId — Approve mot device
+  // POST /api/devices/approve/:deviceId — Approve mot device (file I/O)
   // =========================================================================
   if (route(req, 'POST', '/api/devices/approve/')) {
     const deviceId = req.url.replace('/api/devices/approve/', '').split('?')[0].trim();
@@ -4930,21 +2875,54 @@ const server = http.createServer(async (req, res) => {
       return json(res, 400, { ok: false, error: 'Invalid deviceId format' });
     }
     try {
-      const output = dockerExec(`node dist/index.js devices approve ${deviceId}`, 15000);
-      return json(res, 200, { ok: true, output });
+      let pending = {};
+      try { pending = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')); } catch {}
+      const device = pending[deviceId] || Object.values(pending).find(d => d.deviceId === deviceId);
+      if (!device) return json(res, 404, { ok: false, error: 'Device not found in pending' });
+
+      let paired = {};
+      try { paired = JSON.parse(fs.readFileSync(PAIRED_FILE, 'utf8')); } catch {}
+      const did = device.deviceId || deviceId;
+      const now = Date.now();
+      paired[did] = {
+        ...device,
+        approvedScopes: device.scopes || [],
+        tokens: {
+          [device.role || 'operator']: {
+            token: crypto.randomBytes(32).toString('base64url'),
+            expiresAtMs: now + 365 * 24 * 60 * 60 * 1000
+          }
+        },
+        createdAtMs: device.ts || now,
+        approvedAtMs: now
+      };
+      delete paired[did].requestId;
+      delete paired[did].ts;
+      delete paired[did].silent;
+      delete paired[did].isRepair;
+
+      // Remove from pending (by key or deviceId)
+      for (const key of Object.keys(pending)) {
+        if (key === deviceId || (pending[key].deviceId === deviceId)) {
+          delete pending[key];
+        }
+      }
+
+      fs.mkdirSync(DEVICES_DIR, { recursive: true });
+      fs.writeFileSync(PAIRED_FILE, JSON.stringify(paired, null, 2), 'utf8');
+      fs.writeFileSync(PENDING_FILE, JSON.stringify(pending, null, 2), 'utf8');
+      return json(res, 200, { ok: true, approved: did });
     } catch (e) {
-      const stderr = e.stderr ? e.stderr.toString() : '';
-      const stdout = e.stdout ? e.stdout.toString() : '';
-      return json(res, 200, { ok: false, output: stdout || stderr || e.message });
+      return json(res, 500, { ok: false, error: e.message });
     }
   }
 
   // =========================================================================
-  // POST /api/self-update — Tu dong cap nhat Management API + docker-compose + config templates
+  // POST /api/self-update — Tu dong cap nhat Management API + config templates
   // =========================================================================
   if (route(req, 'POST', '/api/self-update')) {
     try {
-      const REPO_RAW = 'https://raw.githubusercontent.com/Pho-Tue-SoftWare-Solutions-JSC/vps-openclaw-management/main';
+      const REPO_RAW = 'https://raw.githubusercontent.com/hitechcloud-vietnam/vps-openclaw-management/main';
       const MGMT_API_DIR = '/opt/openclaw-mgmt';
 
       // --- Pre-download migration: extract DOMAIN from old Caddyfile before overwriting ---
@@ -4972,7 +2950,7 @@ const server = http.createServer(async (req, res) => {
       ];
       const files = [
         { url: `${REPO_RAW}/management-api/server.js`, dest: `${MGMT_API_DIR}/server.js` },
-        { url: `${REPO_RAW}/docker-compose.yml`, dest: `${COMPOSE_DIR}/docker-compose.yml` },
+        { url: `${REPO_RAW}/version.json`, dest: `${MGMT_API_DIR}/version.json` },
         { url: `${REPO_RAW}/Caddyfile`, dest: `${COMPOSE_DIR}/Caddyfile` },
         ...configTemplates.map(t => ({ url: `${REPO_RAW}/config/${t}.json`, dest: `${TEMPLATES_DIR}/${t}.json` }))
       ];
@@ -5006,13 +2984,13 @@ const server = http.createServer(async (req, res) => {
         let migrated = false;
         if (liveConfig.gateway) {
           if (!liveConfig.gateway.controlUi) {
-            liveConfig.gateway.controlUi = { enabled: true, allowInsecureAuth: true, dangerouslyAllowHostHeaderOriginFallback: true, dangerouslyDisableDeviceAuth: false };
+            liveConfig.gateway.controlUi = { enabled: true, dangerouslyAllowHostHeaderOriginFallback: true };
             migrated = true;
           } else {
+            // allowInsecureAuth / dangerouslyDisableDeviceAuth: OpenClaw >= 2026.9 bao "Unrecognized key"
+            // -> gateway crash (exit 78). Khong them lai; `doctor --fix` tu go tren ban moi.
             const ui = liveConfig.gateway.controlUi;
-            if (!ui.allowInsecureAuth) { ui.allowInsecureAuth = true; migrated = true; }
             if (!ui.dangerouslyAllowHostHeaderOriginFallback) { ui.dangerouslyAllowHostHeaderOriginFallback = true; migrated = true; }
-            if (ui.dangerouslyDisableDeviceAuth === true) { ui.dangerouslyDisableDeviceAuth = false; migrated = true; }
           }
           // Ensure 127.0.0.1 and ::1 in trustedProxies (needed for host network mode)
           const tp = liveConfig.gateway.trustedProxies || [];
@@ -5033,25 +3011,32 @@ const server = http.createServer(async (req, res) => {
             }
             ui2.allowedOrigins = origins;
           }
-        }      
-
+        }
+        // Ensure plugins.entries.bonjour exists (default disabled)
+        if (!liveConfig.plugins) { liveConfig.plugins = { entries: {} }; migrated = true; }
+        if (!liveConfig.plugins.entries) { liveConfig.plugins.entries = {}; migrated = true; }
+        if (liveConfig.plugins.entries.bonjour === undefined) {
+          liveConfig.plugins.entries.bonjour = { enabled: false };
+          migrated = true;
+        }
         if (migrated) writeConfig(liveConfig);
       } catch {}
 
-      // Apply docker-compose changes
-      // (config migration changes mounted volume, gateway only reads config at startup)
-      let composeResult = null;
+      // Restart services after config migration
+      let restartResult = null;
       try {
-        composeResult = dockerCompose('up -d --remove-orphans', 120000);
+        restartService(OPENCLAW_SERVICE);
+        restartService(CADDY_SERVICE);
+        restartResult = 'ok';
       } catch (e) {
-        composeResult = (composeResult || '') + ' ' + e.message;
+        restartResult = e.message;
       }
 
       // Restart management API service (systemd sẽ tự start lại với code mới)
       // Dùng exec async để response kịp trả về trước khi process bị kill
       if (serverJsOk) {
         const msg = allOk ? 'Update complete. Management API restarting...' : 'server.js updated (some templates failed). Management API restarting...';
-        json(res, 200, { ok: allOk, message: msg, files: results, compose: composeResult });
+        json(res, 200, { ok: allOk, message: msg, files: results, restart: restartResult });
         setTimeout(() => {
           try { execSync('systemctl restart openclaw-mgmt', { timeout: 10000 }); } catch {}
         }, 500);
@@ -5089,7 +3074,8 @@ const server = http.createServer(async (req, res) => {
       if (!isValidAgentId(agentId)) return json(res, 400, { ok: false, error: 'Invalid agent id' });
 
       const body = await parseBody(req);
-      const { provider, apiKey } = body;
+      const { apiKey } = body;
+      const provider = resolveProvider(body.provider);
 
       const providerConfig = PROVIDERS[provider];
       if (!providerConfig) return json(res, 400, { ok: false, error: 'Invalid provider' });
@@ -5104,7 +3090,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       setAgentApiKey(agentId, providerConfig.authProfileProvider, apiKey);
-      restartContainer('openclaw');
+      finalizeAuth();
 
       return json(res, 200, { ok: true, agentId, provider, apiKey: sanitizeKey(apiKey) });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5128,7 +3114,7 @@ const server = http.createServer(async (req, res) => {
       config.agents.list[idx].default = true;
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, defaultAgent: agentId });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5170,108 +3156,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // =========================================================================
-  // GET /api/agents/:id/files — List supported workspace files
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/agents/:id/files'))) {
-    try {
-      const agentId = m.params.id;
-      if (!isValidAgentId(agentId)) return json(res, 400, { ok: false, error: 'Invalid agent id' });
-
-      const config = readConfig();
-      const agent = getAgentById(config, agentId);
-      if (!agent) return json(res, 404, { ok: false, error: `Agent '${agentId}' not found` });
-
-      const workspaceDir = getAgentWorkspaceDir(config, agentId);
-      const files = AGENT_WORKSPACE_FILES.map(name => getAgentWorkspaceFileInfo(workspaceDir, name));
-
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        workspace: workspaceDir,
-        files,
-        count: files.length
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // GET /api/agents/:id/files/:name — Get workspace file content
-  // =========================================================================
-  if ((m = route(req, 'GET', '/api/agents/:id/files/:name'))) {
-    try {
-      const agentId = m.params.id;
-      const config = readConfig();
-      const agent = getAgentById(config, agentId);
-      if (!agent) return json(res, 404, { ok: false, error: `Agent '${agentId}' not found` });
-
-      let resolved;
-      try {
-        resolved = resolveAgentWorkspaceFile(config, agentId, m.params.name);
-      } catch (error) {
-        return json(res, 400, { ok: false, error: error.message });
-      }
-
-      const info = getAgentWorkspaceFileInfo(resolved.workspaceDir, resolved.name);
-      if (!info.exists) {
-        return json(res, 404, {
-          ok: false,
-          error: `Workspace file '${resolved.name}' not found`,
-          agentId,
-          workspace: resolved.workspaceDir,
-          file: info
-        });
-      }
-
-      const content = fs.readFileSync(resolved.filePath, 'utf8');
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        workspace: resolved.workspaceDir,
-        file: {
-          ...info,
-          content
-        }
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
-  // PUT /api/agents/:id/files/:name — Create/update workspace file content
-  // =========================================================================
-  if ((m = route(req, 'PUT', '/api/agents/:id/files/:name'))) {
-    try {
-      const agentId = m.params.id;
-      const config = readConfig();
-      const agent = getAgentById(config, agentId);
-      if (!agent) return json(res, 404, { ok: false, error: `Agent '${agentId}' not found` });
-
-      let resolved;
-      try {
-        resolved = resolveAgentWorkspaceFile(config, agentId, m.params.name);
-      } catch (error) {
-        return json(res, 400, { ok: false, error: error.message });
-      }
-
-      const body = await parseBody(req);
-      if (typeof body.content !== 'string') {
-        return json(res, 400, { ok: false, error: 'Missing content string' });
-      }
-
-      fs.mkdirSync(resolved.workspaceDir, { recursive: true });
-      fs.writeFileSync(resolved.filePath, body.content, 'utf8');
-
-      const info = getAgentWorkspaceFileInfo(resolved.workspaceDir, resolved.name);
-      return json(res, 200, {
-        ok: true,
-        agentId,
-        workspace: resolved.workspaceDir,
-        file: info,
-        updated: true
-      });
-    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
-  }
-
-  // =========================================================================
   // PUT /api/agents/:id — Update agent config
   // =========================================================================
   if ((m = route(req, 'PUT', '/api/agents/:id'))) {
@@ -5305,7 +3189,7 @@ const server = http.createServer(async (req, res) => {
 
       config.agents.list[agentIdx] = agent;
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, agent });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5349,7 +3233,7 @@ const server = http.createServer(async (req, res) => {
         if (fs.existsSync(agentDir)) fs.rmSync(agentDir, { recursive: true, force: true });
       }
 
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, id: agentId, removed: true });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5366,14 +3250,17 @@ const server = http.createServer(async (req, res) => {
 
       const agents = list.map(agent => {
         const hasAuth = fs.existsSync(getAgentAuthFile(agent.id));
-        const authData = hasAuth ? readAgentAuth(agent.id) : { profiles: {} };
+        const sqliteProfiles = readSqliteProfiles(agent.id);
+        const authData = sqliteProfiles
+          ? { profiles: sqliteProfiles }
+          : (hasAuth ? readAgentAuth(agent.id) : { profiles: {} });
         const profileCount = Object.keys(authData.profiles || {}).length;
         return {
           id: agent.id,
           name: agent.name || agent.id,
           default: agent.id === defaultId,
           model: agent.model || null,
-          hasAuthProfiles: hasAuth,
+          hasAuthProfiles: hasAuth || !!sqliteProfiles,
           apiKeyCount: profileCount
         };
       });
@@ -5425,7 +3312,7 @@ const server = http.createServer(async (req, res) => {
       writeAgentAuth(id, { profiles: {} });
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 201, { ok: true, agent: newAgent });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5468,7 +3355,7 @@ const server = http.createServer(async (req, res) => {
       config.bindings.push(newBinding);
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 201, { ok: true, binding: newBinding, index: config.bindings.length - 1 });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5502,7 +3389,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, index, binding: config.bindings[index] });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5522,14 +3409,16 @@ const server = http.createServer(async (req, res) => {
       const removed = config.bindings.splice(index, 1)[0];
 
       writeConfig(config);
-      restartContainer('openclaw');
+      restartService(OPENCLAW_SERVICE);
 
       return json(res, 200, { ok: true, index, removed, remaining: config.bindings.length });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
+
   // =========================================================================
-  // POST /api/config/chatgpt-oauth/start — Bat dau ChatGPT OAuth flow
-  // Returns: { sessionId, oauthUrl } — user mo oauthUrl trong browser
+  // POST /api/config/chatgpt-oauth/start — PKCE browser flow (fallback)
+  // Returns: { sessionId, oauthUrl } — user opens oauthUrl in a browser.
+  // For headless VPS prefer the device-code flow (/chatgpt-oauth/device/start).
   // =========================================================================
   if (route(req, 'POST', '/api/config/chatgpt-oauth/start')) {
     try {
@@ -5551,7 +3440,7 @@ const server = http.createServer(async (req, res) => {
         state,
         id_token_add_organizations: 'true',
         codex_cli_simplified_flow: 'true',
-        originator: 'pi'
+        originator: 'openclaw'
       });
       const oauthUrl = `${OPENAI_OAUTH_AUTH_URL}?${params.toString()}`;
 
@@ -5565,9 +3454,98 @@ const server = http.createServer(async (req, res) => {
         oauthUrl,
         models: codexModels,
         defaultModel: codexModels.find(m => m.default)?.id || codexModels[0].id,
-        instructions: 'Open oauthUrl in browser. After login, copy the full redirect URL (localhost:1455/auth/callback?code=...) and POST to /api/config/chatgpt-oauth/complete with { sessionId, redirectUrl, model? }',
+        instructions: 'Open oauthUrl in browser. After login, copy the full redirect URL (localhost:1455/auth/callback?code=...) and POST to /api/config/chatgpt-oauth/complete with { sessionId, redirectUrl, model? }. On a headless VPS, prefer POST /api/config/chatgpt-oauth/device/start instead.',
         sessionExpiresIn: OAUTH_SESSION_TTL / 1000
       });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/config/chatgpt-oauth/device/start — Begin device-code flow
+  // Body: { agentId?, model?, switchProvider? }
+  // Returns: { sessionId, verificationUrl, userCode, expiresIn } — show these
+  // to the user. Server polls in the background; poll /device/status for result.
+  // =========================================================================
+  if (route(req, 'POST', '/api/config/chatgpt-oauth/device/start')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const agentId = (body.agentId && isValidAgentId(body.agentId)) ? body.agentId : 'main';
+
+      let dc;
+      try {
+        dc = requestDeviceCode();
+      } catch (e) {
+        return json(res, 502, { ok: false, error: 'Failed to request device code: ' + e.message });
+      }
+
+      pruneDeviceSessions();
+      const sessionId = crypto.randomBytes(16).toString('hex');
+      const now = Date.now();
+      _deviceSessions[sessionId] = {
+        deviceAuthId: dc.deviceAuthId,
+        userCode: dc.userCode,
+        verificationUrl: dc.verificationUrl,
+        intervalMs: dc.intervalMs,
+        agentId,
+        model: body.model || null,
+        switchProvider: body.switchProvider,
+        createdAt: now,
+        deadline: now + OPENAI_DEVICE_TIMEOUT_MS,
+        status: 'pending',
+        timer: null
+      };
+      // Kick off background polling (first attempt after one interval).
+      _deviceSessions[sessionId].timer = setTimeout(() => pollDeviceSession(sessionId), dc.intervalMs);
+
+      const codexModels = PROVIDERS['openai-codex'].knownModels;
+      return json(res, 200, {
+        ok: true,
+        sessionId,
+        verificationUrl: dc.verificationUrl,
+        userCode: dc.userCode,
+        models: codexModels,
+        defaultModel: codexModels.find(m => m.default)?.id || codexModels[0].id,
+        instructions: `Open ${dc.verificationUrl} on any device, enter the code "${dc.userCode}", and approve. Then poll GET /api/config/chatgpt-oauth/device/status?sessionId=${sessionId}.`,
+        expiresIn: Math.round(OPENAI_DEVICE_TIMEOUT_MS / 1000)
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/config/chatgpt-oauth/device/status?sessionId=... — Poll device flow
+  // Returns: { status: pending|ready|error|expired, ... }
+  // =========================================================================
+  if (route(req, 'GET', '/api/config/chatgpt-oauth/device/status')) {
+    try {
+      const { query } = route(req, 'GET', '/api/config/chatgpt-oauth/device/status');
+      const sessionId = query && query.sessionId;
+      if (!sessionId) return json(res, 400, { ok: false, error: 'Missing sessionId' });
+
+      pruneDeviceSessions();
+      const s = _deviceSessions[sessionId];
+      if (!s) return json(res, 404, { ok: false, error: 'Session not found or expired. Start a new device login.' });
+
+      const base = {
+        ok: true,
+        status: s.status,
+        verificationUrl: s.verificationUrl,
+        userCode: s.userCode,
+        expiresIn: Math.max(0, Math.round((s.deadline - Date.now()) / 1000))
+      };
+      if (s.status === 'ready') {
+        const out = json(res, 200, { ...base, ...s.result });
+        // Session consumed — clean up so tokens aren't replayed.
+        if (s.timer) clearTimeout(s.timer);
+        delete _deviceSessions[sessionId];
+        return out;
+      }
+      if (s.status === 'error' || s.status === 'expired') {
+        const out = json(res, 200, { ...base, error: s.error });
+        if (s.timer) clearTimeout(s.timer);
+        delete _deviceSessions[sessionId];
+        return out;
+      }
+      return json(res, 200, base);
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
@@ -5630,36 +3608,26 @@ const server = http.createServer(async (req, res) => {
       const stored = storeOAuthTokens(tokens, session.agentId);
       delete _oauthSessions[sessionId];
 
-      // Switch provider to openai-codex (default: true unless switchProvider=false)
+      // Switch model to ChatGPT OAuth (default: true unless switchProvider=false)
       const shouldSwitch = body.switchProvider !== false;
       let switchedModel = null;
+      let switchError = null;
       if (shouldSwitch) {
-        try {
-          const finalModel = body.model || 'openai-codex/gpt-5.4';
-          let config;
-          try { config = readConfig(); } catch { config = {}; }
-          if (!config.agents) config.agents = { defaults: { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } } };
-          if (!config.agents.defaults) config.agents.defaults = { model: {}, maxConcurrent: 4, subagents: { maxConcurrent: 8 } };
-          if (!config.agents.defaults.model) config.agents.defaults.model = {};
-          config.agents.defaults.model.primary = finalModel;
-          writeConfig(config);
-          restartContainer('openclaw');
-          switchedModel = finalModel;
-        } catch (e) {
-          return json(res, 200, { ok: true, agentId: session.agentId, tokensStored: true, profileKey: stored.profileKey, accountId: stored.accountId, switchedProvider: false, switchError: e.message });
-        }
-      } else {
-        restartContainer('openclaw');
+        try { switchedModel = applyOAuthModel(body.model); }
+        catch (e) { switchError = e.message; }
       }
+      // Import tokens into SQLite auth store, then restart OpenClaw.
+      finalizeAuth();
 
       return json(res, 200, {
         ok: true,
         agentId: session.agentId,
         tokensStored: true,
+        switchError: switchError || undefined,
         profileKey: stored.profileKey,
         accountId: stored.accountId,
         email: stored.email,
-        switchedProvider: shouldSwitch,
+        switchedProvider: shouldSwitch && !switchError,
         model: switchedModel
       });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
@@ -5684,7 +3652,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       storeOAuthTokens(tokens, agentId);
-      restartContainer('openclaw');
+      finalizeAuth();
 
       const expiresInMs = tokens.expires ? tokens.expires - Date.now() : null;
       return json(res, 200, {
@@ -5703,10 +3671,20 @@ const server = http.createServer(async (req, res) => {
     try {
       const { query } = route(req, 'GET', '/api/config/chatgpt-oauth/status');
       const agentId = (query && query.agentId && isValidAgentId(query.agentId)) ? query.agentId : 'main';
-      const profile = getOAuthProfile(agentId);
+      const all = listOAuthProfiles(agentId);
+      const profile = all[0] || null;
       pruneOAuthSessions();
       const now = Date.now();
       const expires = profile ? profile.expires : null;
+      // One row per connected ChatGPT account (multi-account support).
+      const accounts = all.map(p => ({
+        profileKey: p.key,
+        accountId: p.accountId || null,
+        hasRefreshToken: !!p.refresh,
+        expiresAt: p.expires || null,
+        expiresIn: p.expires ? Math.max(0, Math.round((p.expires - now) / 1000)) : null,
+        expired: p.expires ? p.expires < now : null
+      }));
       return json(res, 200, {
         ok: true,
         agentId,
@@ -5717,8 +3695,104 @@ const server = http.createServer(async (req, res) => {
         expiresAt: expires,
         expiresIn: expires ? Math.max(0, Math.round((expires - now) / 1000)) : null,
         expired: expires ? expires < now : null,
+        accounts,
+        accountCount: accounts.length,
         activeSessions: Object.keys(_oauthSessions).length
       });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/config/chatgpt-oauth/disconnect — Ngat ket noi tai khoan ChatGPT
+  // Body: { agentId?, profileKey? } — profileKey xoa 1 account; bo trong = xoa
+  // tat ca OAuth cua openai. Xoa khoi ca auth-profiles.json va SQLite, restart.
+  // =========================================================================
+  if (route(req, 'POST', '/api/config/chatgpt-oauth/disconnect')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const agentId = (body.agentId && isValidAgentId(body.agentId)) ? body.agentId : 'main';
+
+      const all = listOAuthProfiles(agentId);
+      if (!all.length) {
+        return json(res, 404, { ok: false, error: 'Không có tài khoản ChatGPT nào đang kết nối' });
+      }
+
+      // Determine which profile keys to remove.
+      let targetKeys;
+      if (body.profileKey) {
+        if (!all.some(p => p.key === body.profileKey)) {
+          return json(res, 404, { ok: false, error: 'Không tìm thấy profile: ' + body.profileKey });
+        }
+        targetKeys = [body.profileKey];
+      } else {
+        targetKeys = all.map(p => p.key);
+      }
+
+      // 1. Remove from auth-profiles.json (pre-doctor state).
+      const data = readAgentAuth(agentId);
+      data.profiles = data.profiles || {};
+      for (const k of targetKeys) delete data.profiles[k];
+      writeAgentAuth(agentId, data);
+
+      // 2. Remove from SQLite (live runtime store).
+      let removedFromSqlite = 0;
+      try { removedFromSqlite = removeProfileKeysFromSqlite(agentId, targetKeys); } catch {}
+      try { removedFromSqlite += logoutSharedProfiles(agentId, id => targetKeys.includes(id)); } catch {}
+
+      // 3. Restart so OpenClaw reloads without the revoked tokens.
+      try { restartService(OPENCLAW_SERVICE); } catch {}
+
+      const remaining = listOAuthProfiles(agentId);
+      return json(res, 200, {
+        ok: true,
+        agentId,
+        disconnected: targetKeys,
+        removedFromSqlite,
+        remainingAccounts: remaining.length
+      });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // POST /api/doctor — Run `openclaw doctor --fix`
+  // Migrates legacy auth profiles (openai-codex → openai), repairs config/auth.
+  // Body: { restart? } — restart OpenClaw afterwards (default: true)
+  // =========================================================================
+  if (route(req, 'POST', '/api/doctor')) {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      let output = '';
+      let ok = true;
+      try {
+        output = doctorFix();
+      } catch (e) {
+        ok = false;
+        output = (e.stdout ? e.stdout.toString() : '') + (e.stderr ? e.stderr.toString() : '') || e.message;
+      }
+      if (body.restart !== false) {
+        try { restartService(OPENCLAW_SERVICE); } catch {}
+      }
+      return json(res, 200, { ok, output: output.slice(-8000) });
+    } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
+  }
+
+  // =========================================================================
+  // GET /api/models/status — Run `openclaw models status` (optional ?probe=1)
+  // Shows resolved auth profiles, model availability and probe reason codes.
+  // =========================================================================
+  if (route(req, 'GET', '/api/models/status')) {
+    try {
+      const { query } = route(req, 'GET', '/api/models/status');
+      const probe = query && (query.probe === '1' || query.probe === 'true');
+      let output = '';
+      let ok = true;
+      try {
+        output = openclawExec(`models status${probe ? ' --probe' : ''}`, 60000);
+      } catch (e) {
+        ok = false;
+        output = (e.stdout ? e.stdout.toString() : '') + (e.stderr ? e.stderr.toString() : '') || e.message;
+      }
+      return json(res, 200, { ok, probe: !!probe, output: output.slice(-12000) });
     } catch (e) { return json(res, 500, { ok: false, error: e.message }); }
   }
 
@@ -5772,14 +3846,13 @@ html,body{height:100%;overflow:hidden;background:#0d1117;color:#c9d1d9;font-fami
   </div>
   <div id="qbar">
     <span class="ql">Quick:</span>
-    <button class="qb" onclick="q('docker compose ps')">status</button>
-    <button class="qb" onclick="q('docker compose logs --tail=80 openclaw')">logs</button>
-    <button class="qb" onclick="q('docker compose logs -f openclaw')">logs -f</button>
-    <button class="qb" onclick="q('docker compose restart openclaw')">restart</button>
-    <button class="qb" onclick="q('docker compose pull openclaw')">pull</button>
-    <button class="qb" onclick="q('docker compose up -d')">up -d</button>
-    <button class="qb" onclick="q('docker compose down')">down</button>
-    <button class="qb" onclick="q('docker compose stats --no-stream openclaw')">stats</button>
+    <button class="qb" onclick="q('systemctl status openclaw')">status</button>
+    <button class="qb" onclick="q('journalctl -u openclaw --no-pager -n 80')">logs</button>
+    <button class="qb" onclick="q('journalctl -u openclaw -f')">logs -f</button>
+    <button class="qb" onclick="q('systemctl restart openclaw')">restart</button>
+    <button class="qb" onclick="q('npm update -g openclaw')">upgrade</button>
+    <button class="qb" onclick="q('systemctl start openclaw')">start</button>
+    <button class="qb" onclick="q('systemctl stop openclaw')">stop</button>
     <button class="qb" onclick="q('df -h')">df</button>
     <button class="qb" onclick="q('free -h')">free</button>
     <button class="qb" onclick="q('uptime')">uptime</button>
@@ -5900,7 +3973,7 @@ window.addEventListener('DOMContentLoaded',function(){
   if(tok)document.getElementById('tok').placeholder='Key saved \u2014 click Connect';
   term.write('\\x1b[1;34m OpenClaw Terminal\\x1b[0m\\r\\n');
   term.write('\\x1b[2m \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\x1b[0m\\r\\n');
-  term.write('\\x1b[2m Allowed cmds: docker compose ..., openclaw ...\\x1b[0m\\r\\n');
+  term.write('\\x1b[2m Allowed cmds: systemctl ..., journalctl ..., openclaw ...\\x1b[0m\\r\\n');
   term.write('\\x1b[2m               df, free, uptime, ps, date\\x1b[0m\\r\\n\\r\\n');
   term.write('\\x1b[2m Enter API key above and click Connect\\x1b[0m\\r\\n\\r\\n');
 });
@@ -5961,7 +4034,7 @@ body{min-height:100vh;display:flex;align-items:center;justify-content:center;bac
     <button type="submit" class="btn" id="submitBtn">Sign in</button>
   </form>
  <div class="copyright">
-  <p class="credit">Make with ❤️ by Pho Tue SoftWare Solutions JSC</p>
+  <p class="credit">Make with ❤️ by Tino</p>
 </div>
 </div>
 
@@ -6011,36 +4084,15 @@ try {
     const heapSize = Math.round(os.totalmem() / 1024 / 1024 * 0.8);
     setEnvValue('NODE_OPTIONS', `--max-old-space-size=${heapSize}`);
     console.log(`[Migration] Set NODE_OPTIONS=--max-old-space-size=${heapSize}`);
-    try { dockerCompose('up -d openclaw', 60000); } catch {}
+    try { restartService(OPENCLAW_SERVICE); } catch {}
   }
 } catch {}
-// =============================================================================
-// Auto-refresh OAuth tokens background job (runs every 5 minutes)
-// =============================================================================
-setInterval(() => {
-  try {
-    // Collect all known agent IDs from config + scan agents dir
-    const agentIds = new Set(['main']);
-    try {
-      const config = JSON.parse(fs.readFileSync(`${CONFIG_DIR}/openclaw.json`, 'utf8'));
-      for (const a of (config?.agents?.list || [])) {
-        if (a.id) agentIds.add(a.id);
-      }
-    } catch {}
-    try {
-      for (const d of fs.readdirSync(`${CONFIG_DIR}/agents`)) agentIds.add(d);
-    } catch {}
 
-    let anyRefreshed = false;
-    for (const agentId of agentIds) {
-      const result = tryRefreshAgent(agentId);
-      if (result === 'refreshed') anyRefreshed = true;
-    }
-    if (anyRefreshed) restartContainer('openclaw');
-  } catch (e) {
-    console.error(`[OAuth] Auto-refresh job error: ${e.message}`);
-  }
-}, 5 * 60 * 1000);
+// ChatGPT OAuth do OpenClaw tu quan ly (dashboard: Codex login) — mgmt khong tu refresh
+// token nua (refresh chong len OpenClaw -> token bi xoay vong + doctor dung gateway ~1 phut).
+
+
+ensureRealConfigDir();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Management API] Running on http://0.0.0.0:${PORT}`);

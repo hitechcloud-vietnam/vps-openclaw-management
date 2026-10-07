@@ -1,25 +1,25 @@
-# Integrating Terminal Widget into Laravel
+# Tích hợp Terminal Widget vào Laravel
 
-A small component embedded into a Laravel system. `mgmt_url` and `mgmt_key` are passed from the parent component — each user has their own VPS and key.
+Component nhỏ nhúng vào hệ thống Laravel. `mgmt_url` và `mgmt_key` truyền vào từ component cha — mỗi user có VPS và key riêng.
 
 ---
 
-## Security Architecture
+## Kiến trúc bảo mật
 
 ```
-Parent component
+Component cha
   │  :mgmt-url="$user->vps_url"  :mgmt-key="$user->mgmt_key"
   ▼
 TerminalWidget::mount($mgmtUrl, $mgmtKey)
   │  session['oc_term_<uuid>'] = ['url' => ..., 'key' => ...]
-  │  returns $sessionKey = uuid  ← safe, just an identifier
+  │  trả ra $sessionKey = uuid  ← an toàn, chỉ là định danh
   ▼
 Browser EventSource  →  /terminal/stream?session=<uuid>&cmd=...
   ▼
-TerminalProxyController  →  fetches url/key from session  → proxies to VPS
+TerminalProxyController  →  lấy url/key từ session  →  proxy tới VPS
 ```
 
-> `mgmt_key` is kept **server-side in the session**, never appears in HTML or JS sent to the browser.
+> `mgmt_key` được lưu **server-side trong session**, không bao giờ xuất hiện trong HTML hay JS trả về browser.
 
 ---
 
@@ -34,16 +34,16 @@ data: {"type":"exit","code":0}
 
 ---
 
-## Allowed Commands
+## Lệnh được phép
 
-| Group      | Commands                                                                       |
-|------------|--------------------------------------------------------------------------------|
-| Systemd    | `systemctl status/restart/stop/start openclaw` · `systemctl status/restart caddy` |
-| Journalctl | `journalctl -u openclaw` · `journalctl -u caddy`                               |
-| OpenClaw CLI | `openclaw <cmd>` · `claw <cmd>`                                              |
-| System     | `df` · `free` · `uptime` · `ps` · `date` · `hostname` · `uname`                |
+| Nhóm | Lệnh |
+|------|------|
+| Systemd | `systemctl status/restart/stop/start openclaw` · `systemctl status/restart caddy` |
+| Journalctl | `journalctl -u openclaw` · `journalctl -u caddy` |
+| OpenClaw CLI | `openclaw <cmd>` · `claw <cmd>` |
+| Hệ thống | `df` · `free` · `uptime` · `ps` · `date` · `hostname` · `uname` |
 
-The following shell metacharacters are blocked: `` ; & | ` $ ( ) { } \ ! ' " < > ``
+Shell metacharacter bị block: `` ; & | ` $ ( ) { } \ ! ' " < > ``
 
 ---
 
@@ -59,7 +59,7 @@ Route::middleware(['auth'])->group(function () {
 });
 ```
 
-**Exempt CSRF** — `EventSource` uses GET and cannot send CSRF tokens:
+**Exempt CSRF** — `EventSource` là GET và không gửi được CSRF token:
 
 ```php
 // app/Http/Middleware/VerifyCsrfToken.php
@@ -84,7 +84,7 @@ class TerminalProxyController extends Controller
 {
     public function stream(Request $request)
     {
-        // Get credentials from session — key never goes to browser
+        // Lấy credentials từ session — key thật không đi qua browser
         $sessionKey = $request->query('session', '');
         $creds = session('oc_term_' . $sessionKey);
 
@@ -143,7 +143,7 @@ use Illuminate\Support\Str;
 
 class TerminalWidget extends Component
 {
-    // sessionKey is UUID — safe to expose to JS
+    // sessionKey là UUID — an toàn để expose ra JS
     #[Locked]
     public string $sessionKey = '';
 
@@ -163,14 +163,14 @@ class TerminalWidget extends Component
     ];
 
     /**
-     * @param string $mgmtUrl  VPS Management API URL, e.g., http://103.142.25.188:9998
-     * @param string $mgmtKey  User's Management API key
+     * @param string $mgmtUrl  VPS Management API URL, vd: http://103.142.25.188:9998
+     * @param string $mgmtKey  Management API key của user
      */
     public function mount(string $mgmtUrl, string $mgmtKey): void
     {
         $this->sessionKey = (string) Str::uuid();
 
-        // Store credentials in session — never goes to browser
+        // Lưu credentials vào session — không bao giờ ra browser
         session([
             'oc_term_' . $this->sessionKey => [
                 'url' => $mgmtUrl,
@@ -210,12 +210,12 @@ class TerminalWidget extends Component
         @endforeach
     </div>
 
-    {{-- wire:ignore — required, prevents Livewire from deleting xterm.js DOM --}}
+    {{-- wire:ignore — bắt buộc, ngăn Livewire xoá DOM của xterm.js --}}
     <div wire:ignore class="flex-1 overflow-hidden p-1">
         <div id="oc-terminal-{{ $sessionKey }}"></div>
     </div>
 
-    {{-- Only pass sessionKey (UUID) to JS — never the real key --}}
+    {{-- Chỉ truyền sessionKey (UUID) ra JS — không có key thật --}}
     @script
     <script>
         initOcTerminal({
@@ -236,11 +236,11 @@ class TerminalWidget extends Component
 
 ```js
 // resources/js/terminal-widget.js
-// Supports multiple instances on the same page
+// Hỗ trợ nhiều instance trên cùng một trang
 
 function initOcTerminal({ termId, qbarId, streamUrl, sessionKey }) {
     const stateKey = 'oc_init_' + sessionKey;
-    if (window[stateKey]) return;   // prevent double init on Livewire re-render
+    if (window[stateKey]) return;   // tránh init 2 lần khi Livewire re-render
     window[stateKey] = true;
 
     const HIST_KEY = 'oc_term_hist';
@@ -294,7 +294,7 @@ function initOcTerminal({ termId, qbarId, streamUrl, sessionKey }) {
 
         function execCmd(cmd) {
             running = true;
-            // sessionKey replaces mgmt_key — Laravel looks up in session
+            // sessionKey thay cho mgmt_key — Laravel dùng session để lookup
             const url = streamUrl + '?session=' + encodeURIComponent(sessionKey)
                                   + '&cmd='     + encodeURIComponent(cmd);
             sse = new EventSource(url);
@@ -371,7 +371,7 @@ function initOcTerminal({ termId, qbarId, streamUrl, sessionKey }) {
 window.initOcTerminal = initOcTerminal;
 ```
 
-Import it in your `app.js`:
+Import vào `app.js`:
 
 ```js
 import './terminal-widget.js';
@@ -379,17 +379,17 @@ import './terminal-widget.js';
 
 ---
 
-## 6. Use from Parent Component
+## 6. Dùng từ component cha
 
 ```blade
-{{-- Parent passes url and key per user --}}
+{{-- Parent truyền url và key của từng user --}}
 <livewire:terminal-widget
     :mgmt-url="$server->mgmt_api_url"
     :mgmt-key="$server->mgmt_api_key"
 />
 ```
 
-Supports multiple widget instances on a single page (each has its own `sessionKey` and `termId`):
+Hỗ trợ nhiều instance trên cùng trang (mỗi widget có `sessionKey` và `termId` riêng):
 
 ```blade
 @foreach($user->servers as $server)
@@ -403,7 +403,7 @@ Supports multiple widget instances on a single page (each has its own `sessionKe
 
 ---
 
-## 7. Nginx — disable buffering for SSE
+## 7. Nginx — tắt buffering cho SSE
 
 ```nginx
 location /terminal/stream {
@@ -418,16 +418,16 @@ location /terminal/stream {
 ## Troubleshooting
 
 **`403 Invalid or expired terminal session`**
-Session has expired. Reload the page to generate a new session.
+Session hết hạn. Reload trang để tạo session mới.
 
-**`[stream error]` when running commands**
-Check if `mgmt_url` is correct and port 9998 on the VPS is open.
+**`[stream error]` ngay khi chạy lệnh**
+Kiểm tra `mgmt_url` có đúng không và port 9998 của VPS đang mở.
 
-**Terminal disappears after Livewire re-render**
-Missing `wire:ignore`. Confirm Step 4.
+**Terminal bị xoá sau Livewire re-render**
+Thiếu `wire:ignore`. Xem lại Bước 4.
 
-**No stream output (buffered)**
-Add at the top of the `stream()` method:
+**Stream không ra output (bị buffer)**
+Thêm đầu method `stream()`:
 ```php
 if (ob_get_level()) ob_end_clean();
 ```
